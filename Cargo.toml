@@ -1,0 +1,100 @@
+# ============================================================================
+# rustrade — Open-source trading bot framework
+# ============================================================================
+#
+# Crate layout
+# ------------
+#   rustrade-core       : types, traits, buses — zero runtime, zero deps on I/O
+#   rustrade-supervisor : service lifecycle with backoff + circuit breakers
+#   rustrade-risk       : generic risk primitives (sizing, breakers, session PnL)
+#   rustrade-backtest   : replay engine — depends on core, NOT on supervisor  [skeleton]
+#   rustrade            : facade crate — re-exports everything + Bot builder  [skeleton]
+#
+# Design rules
+# ------------
+#   1. `rustrade-core` has zero optional features. Everything else can be cut.
+#   2. `rustrade-core` does not depend on any other internal crate.
+#   3. `rustrade-backtest` must never be a dep of `rustrade-core` (live-trading
+#      binaries should not pull in backtest code).
+#   4. Exchange integrations live in separate crates (e.g. `exchange-apiws`).
+#      `rustrade` only defines the traits they implement.
+#   5. Indicators live in separate crates (e.g. `indicators-ta`). `rustrade`
+#      does not ship any indicator implementations — just the `Brain` trait
+#      that consumes them.
+#
+# Build status (as of initial skeleton)
+# -------------------------------------
+#   ✅ rustrade-core        — complete, compiles clean
+#   🟡 rustrade-supervisor  — compiles with minimal skeleton; needs port
+#                              of janus-core/supervisor/{backoff,lifecycle,mod}.rs
+#   ✅ rustrade-risk        — complete with 13 passing tests
+#   ⬜ rustrade-backtest    — not yet populated (dir exists, no Cargo.toml)
+#   ⬜ rustrade             — not yet populated (dir exists, no Cargo.toml)
+#   ⬜ examples/noop-bot    — not yet populated
+# ============================================================================
+
+[workspace]
+members = [
+    "crates/rustrade-core",
+    "crates/rustrade-supervisor",
+    "crates/rustrade-risk",
+    # "crates/rustrade-backtest",  # uncomment when Cargo.toml added
+    # "crates/rustrade",           # uncomment when Cargo.toml added
+    # "examples/noop-bot",         # uncomment when Cargo.toml added
+]
+resolver = "3"
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+authors      = ["nuniesmith"]
+license      = "MIT"
+repository   = "https://github.com/nuniesmith/rustrade"
+rust-version = "1.94.1"
+
+[workspace.dependencies]
+# Async runtime
+tokio        = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+tokio-util   = { version = "0.7", features = ["rt"] }
+async-trait  = "0.1"
+futures-util = { version = "0.3", default-features = false }
+
+# Error handling
+anyhow    = "1"
+thiserror = "2"
+
+# Serialisation
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Tracing
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Observability (optional in downstream crates)
+prometheus = "0.14"
+
+# Internal
+rustrade-core       = { path = "crates/rustrade-core",       version = "0.1.0" }
+rustrade-supervisor = { path = "crates/rustrade-supervisor", version = "0.1.0" }
+rustrade-risk       = { path = "crates/rustrade-risk",       version = "0.1.0" }
+
+# ============================================================================
+# Profiles
+# ============================================================================
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 16
+strip         = true
+debug         = false
+panic         = "abort"
+
+[profile.release-with-debug]
+inherits = "release"
+debug    = true
+strip    = false

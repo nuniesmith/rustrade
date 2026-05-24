@@ -1,0 +1,29 @@
+[package]
+name         = "rustrade-supervisor"
+description  = "Service lifecycle supervisor with backoff and circuit breakers for rustrade"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+keywords   = ["supervisor", "tokio", "trading", "lifecycle"]
+categories = ["asynchronous", "concurrency"]
+
+[features]
+# Publish supervisor metrics to a global Prometheus registry.
+# Off by default — downstream binaries opt in if they want Prometheus.
+default = []
+prometheus = ["dep:prometheus"]
+
+[dependencies]
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+tokio-util  = { workspace = true }
+tracing     = { workspace = true }
+prometheus  = { workspace = true, optional = true }
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }

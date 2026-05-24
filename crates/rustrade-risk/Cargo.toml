@@ -1,0 +1,17 @@
+[package]
+name         = "rustrade-risk"
+description  = "Generic risk primitives (position sizing, circuit breakers, session PnL) for rustrade"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+keywords   = ["trading", "risk", "bot", "position-sizing"]
+categories = ["algorithms", "finance"]
+
+[dependencies]
+rustrade-core = { workspace = true }
+serde         = { workspace = true }
+tracing       = { workspace = true }
+thiserror   = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name         = "rustrade-core"
+description  = "Core types and traits for the rustrade trading bot framework"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+readme                 = "README.md"
+keywords      = ["trading", "crypto", "bot", "framework"]
+categories    = ["api-bindings", "asynchronous"]
+
+[dependencies]
+async-trait  = { workspace = true }
+tokio        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+chrono       = { workspace = true }
