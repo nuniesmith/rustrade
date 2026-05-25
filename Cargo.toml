@@ -81,7 +81,7 @@ chrono = { version = "0.4", features = ["serde"] }
 prometheus = "0.14"
 
 # Randomness (used by supervisor backoff jitter)
-rand = "0.9"
+rand = "0.10"
 
 # Property-based testing (dev-only in downstream crates)
 proptest = "1"
