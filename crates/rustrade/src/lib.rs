@@ -49,16 +49,18 @@ pub mod execution;
 pub mod handle;
 pub mod logging;
 pub(crate) mod risk_state;
+pub mod services;
 
 pub use bot::{Bot, BotConfig, BotConfigBuilder, RiskConfig};
 pub use handle::{BotHandle, BotHealth, BrainHealthSnapshot};
+pub use services::{FillRoutingService, MarketFeedService};
 
 // Re-exports from sub-crates so downstream depends on `rustrade` only.
 pub use rustrade_core::{
-    Brain, BrainHealth, Candle, Capability, Decision, Error, Exchange, ExchangeClient, Fill,
-    MarketDataBus, MarketDataEvent, MarketSource, Order, OrderKind, OrderStatus, Position, Price,
-    Result, Side, Signal, SignalBus, SignalType, SizeHint, StopAttachment, StopKind, Symbol, Tick,
-    Volume,
+    Brain, BrainHealth, Candle, Capability, Decision, Error, EventSource, Exchange, ExchangeClient,
+    Fill, FillSource, MarketDataBus, MarketDataEvent, MarketSource, Order, OrderKind, OrderStatus,
+    Position, Price, Result, Side, Signal, SignalBus, SignalType, SizeHint, StopAttachment,
+    StopKind, Symbol, Tick, Volume,
 };
 pub use rustrade_risk::{
     CircuitBreaker, CircuitBreakerConfig, Clock, ManualClock, PositionSizer, SessionPnl,

@@ -20,9 +20,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use rustrade_core::{
-    Brain, ExchangeClient, MarketDataBus, MarketDataEvent, Order, Position, Price, Side,
-    SignalType, SizeHint, Symbol, Volume,
+    Brain, ExchangeClient, MarketDataBus, MarketDataEvent, Order, Position, Price, Side, Signal,
+    SignalBus, SignalType, SizeHint, Symbol, Volume,
 };
 use rustrade_risk::{PositionSizer, SizingConfig};
 use rustrade_supervisor::{RestartPolicy, TradingService};
@@ -39,6 +40,7 @@ use crate::risk_state::{PositionCache, RiskStateMap};
 pub(crate) struct ExecutionContext {
     pub exchange: Arc<dyn ExchangeClient>,
     pub bus: MarketDataBus,
+    pub signals: SignalBus,
     pub positions: PositionCache,
     pub risk: RiskStateMap,
     pub sizing: Arc<SizingConfig>,
@@ -103,6 +105,20 @@ impl ExecutionService {
         if matches!(signal, SignalType::Hold) {
             return Ok(());
         }
+
+        // Publish the brain's intent *before* gates run. Subscribers see
+        // the full signal stream; whether each was acted on is visible
+        // from order placement metrics.
+        let published = self.ctx.signals.publish(Signal {
+            id: format!("{}-{}", self.brain.name(), self.events_processed()),
+            symbol: symbol.as_str().to_string(),
+            kind: signal,
+            confidence: decision.confidence,
+            timestamp: Utc::now(),
+            source: self.brain.name().to_string(),
+            metadata: decision.metadata.clone(),
+        });
+        let _ = published;
 
         // ── Gate 1: session PnL halt ──────────────────────────────────
         if let Some(risk) = self.ctx.risk.read().await.get(&symbol)

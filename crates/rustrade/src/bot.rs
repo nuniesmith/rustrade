@@ -7,13 +7,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustrade_core::{Brain, Error, ExchangeClient, MarketDataBus, Position, Result, Symbol};
+use rustrade_core::{
+    Brain, Error, ExchangeClient, FillSource, MarketDataBus, MarketSource, Position, Result,
+    SignalBus, Symbol,
+};
 use rustrade_risk::{CircuitBreakerConfig, SessionPnlConfig, SizingConfig};
 use rustrade_supervisor::{Supervisor, SupervisorConfig};
+use tokio_util::sync::CancellationToken;
 
 use crate::execution::{ExecutionContext, ExecutionService};
 use crate::handle::BotHandle;
 use crate::risk_state::{PositionCache, RiskStateMap, build_position_cache, build_risk_state};
+use crate::services::{FillRoutingService, MarketFeedService};
 
 const DEFAULT_MARKET_BUS_CAPACITY: usize = 1024;
 
@@ -174,11 +179,15 @@ pub struct Bot {
     config: BotConfig,
     supervisor: Arc<Supervisor>,
     exchange: Arc<dyn ExchangeClient>,
-    brains: Vec<Arc<dyn Brain>>,
+    brains: Arc<Vec<Arc<dyn Brain>>>,
     market_bus: MarketDataBus,
+    signal_bus: SignalBus,
     positions: PositionCache,
     risk: RiskStateMap,
     handle: BotHandle,
+    external_cancel: Option<CancellationToken>,
+    market_source: Option<Arc<dyn MarketSource>>,
+    fill_source: Option<Arc<dyn FillSource>>,
 }
 
 impl Bot {
@@ -211,6 +220,7 @@ impl Bot {
         ));
 
         let market_bus = MarketDataBus::with_capacity(config.market_bus_capacity);
+        let signal_bus = SignalBus::with_capacity(config.market_bus_capacity);
         let positions = build_position_cache(&config.symbols);
         let risk = build_risk_state(
             &config.symbols,
@@ -218,11 +228,13 @@ impl Bot {
             &config.risk.circuit_breaker,
         );
 
+        let brains = Arc::new(brains);
         let handle = BotHandle::new(
             supervisor.clone(),
             brains.clone(),
             risk.clone(),
             positions.clone(),
+            signal_bus.clone(),
         );
 
         Ok(Self {
@@ -231,10 +243,45 @@ impl Bot {
             exchange,
             brains,
             market_bus,
+            signal_bus,
             positions,
             risk,
             handle,
+            external_cancel: None,
+            market_source: None,
+            fill_source: None,
         })
+    }
+
+    /// Tie this bot's shutdown to an externally-owned cancellation token.
+    ///
+    /// When the external token is cancelled, the bot's supervisor token
+    /// is cancelled too — equivalent to calling [`BotHandle::shutdown`]
+    /// but without spawning a linker task in the host.
+    ///
+    /// The reverse is not true: cancelling the bot does not cancel the
+    /// external token.
+    pub fn with_external_cancel(mut self, token: CancellationToken) -> Self {
+        self.external_cancel = Some(token);
+        self
+    }
+
+    /// Attach a [`MarketSource`] to be driven by a supervised
+    /// [`MarketFeedService`]. Source implementors are responsible for
+    /// publishing to the bot's [`MarketDataBus`] (obtain via
+    /// `bot.market_data_bus().clone()` before constructing the source).
+    pub fn with_market_source(mut self, source: Arc<dyn MarketSource>) -> Self {
+        self.market_source = Some(source);
+        self
+    }
+
+    /// Attach a [`FillSource`] to be driven by a supervised
+    /// [`FillRoutingService`]. Fills are routed to every brain via
+    /// `Brain::on_fill` and the position cache is refreshed from the
+    /// exchange after each one.
+    pub fn with_fill_source(mut self, source: Arc<dyn FillSource>) -> Self {
+        self.fill_source = Some(source);
+        self
     }
 
     /// Cheap cloneable handle for host services. Can be obtained at any
@@ -253,6 +300,14 @@ impl Bot {
     /// publish here; the bot's framework services subscribe.
     pub fn market_data_bus(&self) -> &MarketDataBus {
         &self.market_bus
+    }
+
+    /// Borrow the in-process signal bus. The execution service publishes
+    /// a [`Signal`](rustrade_core::Signal) to this bus on every
+    /// non-`Hold` decision the brain emits; host services subscribe via
+    /// [`BotHandle::subscribe_signals`].
+    pub fn signal_bus(&self) -> &SignalBus {
+        &self.signal_bus
     }
 
     /// Spawn the framework services and run until shutdown.
@@ -277,14 +332,41 @@ impl Bot {
         let ctx = ExecutionContext {
             exchange: self.exchange.clone(),
             bus: self.market_bus.clone(),
+            signals: self.signal_bus.clone(),
             positions: self.positions.clone(),
             risk: self.risk.clone(),
             sizing,
         };
 
-        for brain in &self.brains {
+        for brain in self.brains.iter() {
             let svc = ExecutionService::new(brain.clone(), ctx.clone());
             self.supervisor.spawn_service(Box::new(svc));
+        }
+
+        if let Some(source) = self.market_source.clone() {
+            self.supervisor
+                .spawn_service(Box::new(MarketFeedService::new(source)));
+        }
+
+        if let Some(source) = self.fill_source.clone() {
+            self.supervisor
+                .spawn_service(Box::new(FillRoutingService::new(
+                    source,
+                    self.brains.clone(),
+                    self.exchange.clone(),
+                    self.positions.clone(),
+                )));
+        }
+
+        // External cancellation linker: when the host's token fires,
+        // cancel the supervisor's root token. The reverse is not wired.
+        if let Some(external) = self.external_cancel.clone() {
+            let supervisor = self.supervisor.clone();
+            tokio::spawn(async move {
+                external.cancelled().await;
+                tracing::info!("external cancellation received; triggering bot shutdown");
+                supervisor.trigger_shutdown();
+            });
         }
 
         let run_result = self.supervisor.run_until_shutdown().await;
@@ -293,7 +375,7 @@ impl Bot {
             self.close_open_positions().await;
         }
 
-        for brain in &self.brains {
+        for brain in self.brains.iter() {
             let health = brain.health().await;
             tracing::info!(
                 brain = %brain.name(),

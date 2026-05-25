@@ -42,7 +42,9 @@ pub mod types;
 pub use brain::{Brain, BrainHealth, Decision, SizeHint};
 pub use bus::{MarketDataBus, SignalBus};
 pub use error::{Error, Result};
-pub use exchange::{Capability, ExchangeClient, MarketSource, OrderStatus};
+pub use exchange::{
+    Capability, EventSource, ExchangeClient, FillSource, MarketSource, OrderStatus,
+};
 pub use market::{Exchange, MarketDataEvent, Side, Symbol};
 pub use signal::{Signal, SignalType};
 pub use types::{
