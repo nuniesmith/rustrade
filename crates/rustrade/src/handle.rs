@@ -5,6 +5,8 @@
 //! - Query aggregated health via [`BotHandle::health`].
 //! - Trigger shutdown via [`BotHandle::shutdown`].
 //! - Await shutdown via [`BotHandle::await_shutdown`].
+//! - Feed realised trade outcomes into the risk gates via
+//!   [`BotHandle::record_trade_outcome`].
 //!
 //! The handle is `Clone` so multiple parts of the host service (an HTTP
 //! handler, a metrics endpoint, a shutdown coordinator) can hold one
@@ -13,9 +15,11 @@
 
 use std::sync::Arc;
 
-use rustrade_core::Brain;
+use rustrade_core::{Brain, Position, Symbol};
 use rustrade_supervisor::{ServiceLifecycleSnapshot, Supervisor};
 use tokio_util::sync::CancellationToken;
+
+use crate::risk_state::{PositionCache, RiskStateMap};
 
 /// Aggregated health snapshot returned by [`BotHandle::health`].
 #[derive(Debug, Clone)]
@@ -46,18 +50,23 @@ pub struct BotHandle {
     cancel: CancellationToken,
     supervisor: Arc<Supervisor>,
     brains: Arc<Vec<Arc<dyn Brain>>>,
+    risk: RiskStateMap,
+    positions: PositionCache,
 }
 
 impl BotHandle {
     pub(crate) fn new(
         supervisor: Arc<Supervisor>,
         brains: Vec<Arc<dyn Brain>>,
-        _brain_names: Vec<String>,
+        risk: RiskStateMap,
+        positions: PositionCache,
     ) -> Self {
         Self {
             cancel: supervisor.cancel_token().clone(),
             supervisor,
             brains: Arc::new(brains),
+            risk,
+            positions,
         }
     }
 
@@ -76,6 +85,53 @@ impl BotHandle {
     /// supervisor cancellation).
     pub async fn await_shutdown(&self) {
         self.cancel.cancelled().await;
+    }
+
+    /// Feed a realised trade outcome into the per-symbol risk state.
+    ///
+    /// Called by the host (or a brain) when a position closes. Updates
+    /// the symbol's `SessionPnl` and records a win/loss on the
+    /// `CircuitBreaker` based on the **net** PnL.
+    ///
+    /// Phase 2b does not automate this from the fill stream — that's
+    /// `FillRoutingService` territory in Phase 2c.
+    pub async fn record_trade_outcome(&self, symbol: &Symbol, gross_pnl: f64, fee: f64) {
+        let mut map = self.risk.write().await;
+        if let Some(risk) = map.get_mut(symbol) {
+            risk.session_pnl.record_close(gross_pnl, fee);
+            let net = gross_pnl - fee;
+            if net > 0.0 {
+                risk.circuit_breaker.record_win();
+            } else if net < 0.0 {
+                risk.circuit_breaker.record_loss();
+            }
+        } else {
+            tracing::warn!(
+                symbol = %symbol,
+                "record_trade_outcome: symbol not in risk state map (was it configured?)"
+            );
+        }
+    }
+
+    /// Read the current cached position for a symbol, or `Position::FLAT`
+    /// if the symbol isn't tracked.
+    pub async fn position(&self, symbol: &Symbol) -> Position {
+        self.positions
+            .read()
+            .await
+            .get(symbol)
+            .copied()
+            .unwrap_or(Position::FLAT)
+    }
+
+    /// Overwrite the cached position for a symbol. Typically called by the
+    /// host's fill-handling code; Phase 2c's `FillRoutingService` will do
+    /// this automatically.
+    pub async fn set_position(&self, symbol: &Symbol, position: Position) {
+        self.positions
+            .write()
+            .await
+            .insert(symbol.clone(), position);
     }
 
     /// Snapshot of bot-wide health.

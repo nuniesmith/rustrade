@@ -10,6 +10,34 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Facade crate, risk-gated execution (Phase 2b).** Builds on the
+  Phase 2a facade:
+  - `RiskConfig` carrying `SessionPnlConfig`, `CircuitBreakerConfig`,
+    and `SizingConfig` is now part of `BotConfig`. New builder methods
+    `session_pnl_config`, `circuit_breaker_config`, `sizing_config`.
+  - `ExecutionService` runs the full pre-trade gate sequence:
+    `SessionPnl::is_session_halted` → `CircuitBreaker::is_tripped` →
+    `PositionSizer::contracts`. Each blocked decision emits a
+    structured `tracing` event with the gate that fired. Buy/Sell place
+    market orders; `Close` emits a `reduce_only` order sized to the
+    cached position.
+  - Per-symbol `RiskStateMap` and `PositionCache` constructed at
+    `Bot::new` and shared between services.
+  - `Bot::run_until_shutdown` prefetches positions for each configured
+    symbol on startup via `exchange.get_position` (best-effort —
+    failures are logged and the cache stays at `FLAT`).
+  - `close_positions_on_shutdown = true` now actually closes any
+    non-flat cached position via `exchange.close_position` after the
+    supervisor drains. Best-effort; errors are logged.
+  - `BotHandle::record_trade_outcome(&Symbol, gross_pnl, fee)` feeds
+    realised trade outcomes into the per-symbol `SessionPnl` and
+    `CircuitBreaker`. (Automatic fill-driven feeding lands with
+    `FillRoutingService` in Phase 2c.)
+  - `BotHandle::position(&Symbol)` and `BotHandle::set_position(...)`
+    for host code that owns its own fill flow.
+  - 7 new integration tests in `tests/risk_gates.rs` covering the
+    happy path, each blocked gate, close-on-shutdown, and the close
+    decision against both held and flat positions.
 - **Facade crate, minimum viable (Phase 2a).** New
   [`rustrade`](./crates/rustrade) crate, the entry point downstream
   services depend on:

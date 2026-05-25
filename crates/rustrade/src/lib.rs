@@ -33,23 +33,25 @@
 //!
 //! # Module status
 //!
-//! | Module      | Phase 2a                                              |
-//! | ----------- | ----------------------------------------------------- |
-//! | `bot`       | `Bot`, `BotConfig`, `BotConfigBuilder` — complete     |
-//! | `handle`    | `BotHandle`, `BotHealth` — complete                   |
-//! | `execution` | `ExecutionService` routes events → brains             |
-//! | `logging`   | `init_tracing` complete                               |
+//! | Module       | Phase 2a → 2b                                              |
+//! | ------------ | ---------------------------------------------------------- |
+//! | `bot`        | `Bot`, `BotConfig`, `BotConfigBuilder`, `RiskConfig`       |
+//! | `handle`     | `BotHandle`, `BotHealth`, `record_trade_outcome`           |
+//! | `execution`  | `ExecutionService` with full risk-gate pipeline            |
+//! | `risk_state` | `PositionCache`, `RiskStateMap`, `SymbolRisk` (crate-pub)  |
+//! | `logging`    | `init_tracing` complete                                    |
 //!
-//! Risk gating, fill routing, candle polling, and the pluggable
-//! `MetricsSink` are Phase 2b/2c — see the workspace `TODO.md`.
+//! Fill routing, candle polling, the pluggable `MetricsSink`, and signal
+//! subscription are Phase 2c — see the workspace `TODO.md`.
 
 pub mod bot;
 pub mod execution;
 pub mod handle;
 pub mod logging;
+pub(crate) mod risk_state;
 
-pub use bot::{Bot, BotConfig, BotConfigBuilder};
-pub use handle::{BotHandle, BotHealth};
+pub use bot::{Bot, BotConfig, BotConfigBuilder, RiskConfig};
+pub use handle::{BotHandle, BotHealth, BrainHealthSnapshot};
 
 // Re-exports from sub-crates so downstream depends on `rustrade` only.
 pub use rustrade_core::{
