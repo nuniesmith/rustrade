@@ -142,6 +142,7 @@ pub trait ExchangeClient: Send + Sync + 'static {
 ///   implementing type rather than at the end of `run`.
 #[async_trait]
 pub trait MarketSource: Send + Sync + 'static {
+    /// Short identifier for logging — typically the exchange name.
     fn name(&self) -> &str;
 
     /// Begin streaming events. Should run until the feed terminates or

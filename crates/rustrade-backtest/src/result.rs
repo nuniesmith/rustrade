@@ -32,6 +32,7 @@ pub struct BacktestResult {
 }
 
 impl BacktestResult {
+    /// Total return as a percentage of initial cash.
     pub fn total_return_pct(&self) -> f64 {
         if self.initial_cash == 0.0 {
             0.0
@@ -40,6 +41,7 @@ impl BacktestResult {
         }
     }
 
+    /// Count of trades with net PnL > 0.
     pub fn wins(&self) -> usize {
         self.trades
             .iter()
@@ -47,6 +49,7 @@ impl BacktestResult {
             .count()
     }
 
+    /// Count of trades with net PnL < 0.
     pub fn losses(&self) -> usize {
         self.trades
             .iter()
@@ -54,6 +57,7 @@ impl BacktestResult {
             .count()
     }
 
+    /// Count of trades with net PnL == 0.
     pub fn breakevens(&self) -> usize {
         self.trades
             .iter()

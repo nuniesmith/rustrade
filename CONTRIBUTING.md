@@ -76,6 +76,31 @@ All five commands must pass before opening a PR. CI runs the same set.
 - Tests live alongside the code in `#[cfg(test)] mod tests` blocks.
   Integration tests go under `crates/<crate>/tests/`.
 
+## Versioning policy
+
+All crates in this workspace track a **single workspace-level version**
+(currently `0.1.0`). Bumping `[workspace.package].version` in the root
+`Cargo.toml` bumps every member crate together. This keeps cross-crate
+references in lockstep — `rustrade` always uses the same minor version
+of `rustrade-core`/`rustrade-supervisor`/`rustrade-risk`/`rustrade-backtest`
+that it ships with — at the cost of per-crate flexibility.
+
+Until 0.1.0 ships, any release may contain breaking changes; the
+`CHANGELOG.md` flags them with **BREAKING** on the relevant bullet.
+Pin to an exact version (`rustrade = "=0.1.0"`) until the API
+stabilises.
+
+Future publish workflow (Phase 6b):
+
+1. `cargo publish -p rustrade-core`
+2. `cargo publish -p rustrade-supervisor`
+3. `cargo publish -p rustrade-risk`
+4. `cargo publish -p rustrade-backtest`
+5. `cargo publish -p rustrade`
+
+Each step waits for the previous crate to appear on crates.io.
+Automation lands when CI does.
+
 ## Reporting bugs & proposing features
 
 Open a GitHub issue. For bugs, include the minimal reproducer, the

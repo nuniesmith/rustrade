@@ -17,7 +17,12 @@ pub enum FeeModel {
     Flat(f64),
     /// Different rates for maker vs taker fills.
     /// Phase 4a: every market order is treated as taker.
-    MakerTaker { maker: f64, taker: f64 },
+    MakerTaker {
+        /// Fraction-of-notional rate when the fill is a maker.
+        maker: f64,
+        /// Fraction-of-notional rate when the fill is a taker.
+        taker: f64,
+    },
 }
 
 impl Default for FeeModel {

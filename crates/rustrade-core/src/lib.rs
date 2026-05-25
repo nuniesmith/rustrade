@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! # rustrade-core
 //!
 //! Core types and traits for the rustrade trading bot framework.

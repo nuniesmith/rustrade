@@ -78,16 +78,21 @@ impl Default for SupervisorConfig {
 }
 
 impl SupervisorConfig {
+    /// Override the drain timeout.
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
         self
     }
 
+    /// Override the default backoff config applied to services that don't
+    /// supply their own [`SpawnOptions::backoff`].
     pub fn with_default_backoff(mut self, backoff: BackoffConfig) -> Self {
         self.default_backoff = backoff;
         self
     }
 
+    /// Skip installing the supervisor's signal handler — the host
+    /// service drives shutdown directly.
     pub fn without_signal_handler(mut self) -> Self {
         self.install_signal_handler = false;
         self
@@ -104,10 +109,15 @@ impl SupervisorConfig {
 /// crate-local prometheus registry (see [`crate::prometheus`]).
 #[derive(Debug, Default)]
 pub struct SupervisorMetrics {
+    /// Total service restarts (clean-exit + on-failure cycles).
     pub restarts_total: AtomicU64,
+    /// Currently-alive services (not yet in `Terminated`).
     pub active_services: AtomicU64,
+    /// Total services ever spawned, including restarts.
     pub spawned_total: AtomicU64,
+    /// Total services that have reached `Terminated`.
     pub terminated_total: AtomicU64,
+    /// Total times any service's circuit breaker has tripped.
     pub circuit_breaker_trips: AtomicU64,
 }
 
@@ -186,10 +196,15 @@ impl SupervisorMetrics {
 /// Plain-data snapshot of supervisor metrics.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MetricsSnapshot {
+    /// Total service restarts captured at snapshot time.
     pub restarts_total: u64,
+    /// Currently-alive services at snapshot time.
     pub active_services: u64,
+    /// Total services ever spawned (including restarts).
     pub spawned_total: u64,
+    /// Total services terminated.
     pub terminated_total: u64,
+    /// Total circuit-breaker trips.
     pub circuit_breaker_trips: u64,
 }
 

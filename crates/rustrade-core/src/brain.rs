@@ -56,6 +56,7 @@ pub enum SizeHint {
 /// the execution and risk layers may or may not use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
+    /// What the brain decided to do (Buy / Sell / Hold / Close).
     pub signal: SignalType,
     /// Confidence in [0.0, 1.0].
     pub confidence: f64,
@@ -84,6 +85,7 @@ impl Decision {
         }
     }
 
+    /// Convenience: open or flip a long with the given confidence.
     pub fn buy(confidence: f64) -> Self {
         Self {
             signal: SignalType::Buy,
@@ -92,6 +94,7 @@ impl Decision {
         }
     }
 
+    /// Convenience: open or flip a short with the given confidence.
     pub fn sell(confidence: f64) -> Self {
         Self {
             signal: SignalType::Sell,
@@ -100,6 +103,7 @@ impl Decision {
         }
     }
 
+    /// Convenience: close the current position without reversing.
     pub fn close() -> Self {
         Self {
             signal: SignalType::Close,
@@ -108,21 +112,25 @@ impl Decision {
         }
     }
 
+    /// Suggest a stop-loss price.
     pub fn with_stop(mut self, price: Price) -> Self {
         self.stop_price = Some(price);
         self
     }
 
+    /// Suggest a take-profit price.
     pub fn with_take_profit(mut self, price: Price) -> Self {
         self.take_profit_price = Some(price);
         self
     }
 
+    /// Override the default size hint.
     pub fn with_size_hint(mut self, hint: SizeHint) -> Self {
         self.size_hint = hint;
         self
     }
 
+    /// Attach free-form metadata for logging / post-hoc analysis.
     pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = metadata;
         self
@@ -144,6 +152,7 @@ pub struct BrainHealth {
 }
 
 impl BrainHealth {
+    /// A healthy default with zero counters.
     pub fn ok() -> Self {
         Self {
             healthy: true,
@@ -151,6 +160,7 @@ impl BrainHealth {
         }
     }
 
+    /// An unhealthy state with a single `reason` field in `details`.
     pub fn unhealthy(reason: impl Into<String>) -> Self {
         Self {
             healthy: false,

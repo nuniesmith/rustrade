@@ -30,11 +30,13 @@ pub struct BacktestConfig {
 }
 
 impl BacktestConfig {
+    /// Start a [`BacktestConfigBuilder`].
     pub fn builder() -> BacktestConfigBuilder {
         BacktestConfigBuilder::default()
     }
 }
 
+/// Builder for [`BacktestConfig`]. Validates on [`Self::build`].
 #[derive(Debug, Clone, Default)]
 pub struct BacktestConfigBuilder {
     symbol: Option<Symbol>,
@@ -46,31 +48,39 @@ pub struct BacktestConfigBuilder {
 }
 
 impl BacktestConfigBuilder {
+    /// Symbol to backtest. Required.
     pub fn symbol(mut self, sym: impl Into<Symbol>) -> Self {
         self.symbol = Some(sym.into());
         self
     }
+    /// Override the starting cash balance (default 10_000.0).
     pub fn initial_cash(mut self, cash: f64) -> Self {
         self.initial_cash = Some(cash);
         self
     }
+    /// Override the position-sizing config.
     pub fn sizing(mut self, sizing: SizingConfig) -> Self {
         self.sizing = Some(sizing);
         self
     }
+    /// Override the slippage model (default `Zero`).
     pub fn slippage(mut self, m: SlippageModel) -> Self {
         self.slippage = Some(m);
         self
     }
+    /// Override the fee model (default `Flat(0.0005)`).
     pub fn fees(mut self, m: FeeModel) -> Self {
         self.fees = Some(m);
         self
     }
+    /// Override the contract multiplier (default 1.0 — spot).
     pub fn contract_value(mut self, cv: f64) -> Self {
         self.contract_value = Some(cv);
         self
     }
 
+    /// Validate and build. Returns `Error::Config` on any constraint
+    /// violation.
     pub fn build(self) -> Result<BacktestConfig> {
         let symbol = self
             .symbol

@@ -86,23 +86,30 @@ pub struct SignalBus {
 }
 
 impl SignalBus {
+    /// Create a new bus with the default capacity.
     pub fn new() -> Self {
         Self::with_capacity(DEFAULT_CAPACITY)
     }
 
+    /// Create a new bus with an explicit channel capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
         Self { tx }
     }
 
+    /// Subscribe a new consumer. The receiver sees signals published
+    /// *after* this call.
     pub fn subscribe(&self) -> broadcast::Receiver<Signal> {
         self.tx.subscribe()
     }
 
+    /// Publish a signal. Returns the number of active subscribers that
+    /// received it (zero if none).
     pub fn publish(&self, signal: Signal) -> usize {
         self.tx.send(signal).unwrap_or(0)
     }
 
+    /// Current number of subscribers.
     pub fn subscriber_count(&self) -> usize {
         self.tx.receiver_count()
     }

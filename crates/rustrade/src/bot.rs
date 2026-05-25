@@ -29,8 +29,11 @@ const DEFAULT_SIGNAL_BUS_CAPACITY: usize = 256;
 /// symbol gets the same `SessionPnl`, `CircuitBreaker`, and `PositionSizer`.
 #[derive(Debug, Clone, Default)]
 pub struct RiskConfig {
+    /// Session PnL config applied to every configured symbol.
     pub session_pnl: SessionPnlConfig,
+    /// Circuit-breaker config applied to every configured symbol.
     pub circuit_breaker: CircuitBreakerConfig,
+    /// Position-sizing config used by the execution service.
     pub sizing: SizingConfig,
 }
 
@@ -97,6 +100,7 @@ pub struct BotConfigBuilder {
 }
 
 impl BotConfigBuilder {
+    /// Human-readable bot name (logs, supervisor identification). Required.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -118,6 +122,7 @@ impl BotConfigBuilder {
         self
     }
 
+    /// Maximum time to wait for services to drain on shutdown.
     pub fn shutdown_timeout(mut self, dur: Duration) -> Self {
         self.shutdown_timeout = Some(dur);
         self
@@ -129,6 +134,7 @@ impl BotConfigBuilder {
         self
     }
 
+    /// Override the in-process market-data bus capacity (default 1024).
     pub fn market_bus_capacity(mut self, cap: usize) -> Self {
         self.market_bus_capacity = Some(cap);
         self
@@ -140,6 +146,8 @@ impl BotConfigBuilder {
         self
     }
 
+    /// Enable best-effort `exchange.close_position` for non-flat positions
+    /// after the supervisor drains.
     pub fn close_positions_on_shutdown(mut self, b: bool) -> Self {
         self.close_positions_on_shutdown = Some(b);
         self

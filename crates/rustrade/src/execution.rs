@@ -71,15 +71,19 @@ impl ExecutionService {
         }
     }
 
+    /// Total events the brain has been called with.
     pub fn events_processed(&self) -> u64 {
         self.events_processed.load(Ordering::Relaxed)
     }
+    /// Total events dropped by the broadcast bus due to slow consumption.
     pub fn events_dropped(&self) -> u64 {
         self.events_dropped.load(Ordering::Relaxed)
     }
+    /// Total orders successfully passed to the exchange.
     pub fn orders_placed(&self) -> u64 {
         self.orders_placed.load(Ordering::Relaxed)
     }
+    /// Total decisions blocked by a risk gate or by the sizer returning 0.
     pub fn orders_blocked(&self) -> u64 {
         self.orders_blocked.load(Ordering::Relaxed)
     }

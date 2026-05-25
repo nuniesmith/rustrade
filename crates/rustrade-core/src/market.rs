@@ -9,7 +9,9 @@ use crate::types::{Candle, Tick};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
+    /// Buying side — long entries and short exits.
     Buy,
+    /// Selling side — short entries and long exits.
     Sell,
 }
 
@@ -110,28 +112,41 @@ impl From<&str> for Exchange {
 pub enum MarketDataEvent {
     /// Best-bid/best-ask update.
     Ticker {
+        /// Exchange this ticker came from.
         exchange: Exchange,
+        /// Symbol the ticker is for.
         symbol: Symbol,
+        /// The tick itself.
         tick: Tick,
     },
     /// A completed candle (fully closed bar).
     Candle {
+        /// Exchange this candle came from.
         exchange: Exchange,
+        /// Symbol the candle is for.
         symbol: Symbol,
+        /// The OHLCV candle.
         candle: Candle,
     },
     /// An individual trade print.
     Trade {
+        /// Exchange this trade was reported by.
         exchange: Exchange,
+        /// Symbol the trade was for.
         symbol: Symbol,
+        /// Aggressor side of the trade.
         side: Side,
+        /// Trade price in quote currency.
         price: f64,
+        /// Trade size in base-asset units or contracts.
         size: f64,
+        /// Time the trade occurred.
         timestamp: DateTime<Utc>,
     },
 }
 
 impl MarketDataEvent {
+    /// Borrow the event's [`Symbol`] regardless of variant.
     pub fn symbol(&self) -> &Symbol {
         match self {
             Self::Ticker { symbol, .. }
@@ -140,6 +155,7 @@ impl MarketDataEvent {
         }
     }
 
+    /// Borrow the event's source [`Exchange`] regardless of variant.
     pub fn exchange(&self) -> &Exchange {
         match self {
             Self::Ticker { exchange, .. }

@@ -10,6 +10,21 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Documentation + release polish (Phase 6a).**
+  - `#![warn(missing_docs)]` on every published crate. Every public
+    item now carries at least a one-line rustdoc, surfaced through
+    `cargo doc`. Tightens the docs.rs landing page and CI catches
+    regressions.
+  - New `docs/quickstart.md` — "Your first rustrade bot in 50 lines"
+    walks through wiring a `Brain`, a stub `ExchangeClient`, and the
+    `Bot` builder end-to-end, mirroring `examples/noop-bot/`.
+  - Versioning policy documented in `CONTRIBUTING.md`: workspace-locked
+    `0.1.x` for all crates plus the planned publish ordering
+    (core → supervisor → risk → backtest → rustrade).
+  - Top-level `README.md` gains a "Getting started" section linking
+    the quickstart, all four examples, and the API docs.
+
+### Added
 - **Service-integration ergonomics (Phase 5).**
   - `BotConfig.signal_bus_capacity` (default 256) now separate from
     `market_bus_capacity` (default 1024). Signal-bus consumers can be
