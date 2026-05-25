@@ -1,0 +1,25 @@
+[package]
+name         = "rustrade-backtest"
+description  = "Deterministic backtest engine for rustrade Brains — same trait, same brain, replayed offline"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+readme     = "README.md"
+keywords   = ["trading", "backtest", "replay", "rustrade"]
+categories = ["algorithms", "finance", "simulation"]
+
+[dependencies]
+rustrade-core = { workspace = true }
+rustrade-risk = { workspace = true }
+async-trait   = { workspace = true }
+tokio         = { workspace = true }
+serde         = { workspace = true }
+tracing       = { workspace = true }
+thiserror     = { workspace = true }
+chrono        = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
