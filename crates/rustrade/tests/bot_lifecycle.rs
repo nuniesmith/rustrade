@@ -149,6 +149,7 @@ async fn bot_handle_health_reports_running_service() {
     let bot = Bot::new(
         BotConfig::builder()
             .name("health-test")
+            .symbol("BTCUSDT")
             .without_signal_handler()
             .shutdown_timeout(Duration::from_secs(2))
             .build()
@@ -190,6 +191,7 @@ async fn external_shutdown_via_handle_clone_drains_bot() {
     let bot = Bot::new(
         BotConfig::builder()
             .name("ext-shutdown")
+            .symbol("BTCUSDT")
             .without_signal_handler()
             .shutdown_timeout(Duration::from_secs(2))
             .build()

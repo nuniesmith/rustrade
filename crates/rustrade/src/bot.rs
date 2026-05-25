@@ -21,6 +21,7 @@ use crate::risk_state::{PositionCache, RiskStateMap, build_position_cache, build
 use crate::services::{FillRoutingService, MarketFeedService};
 
 const DEFAULT_MARKET_BUS_CAPACITY: usize = 1024;
+const DEFAULT_SIGNAL_BUS_CAPACITY: usize = 256;
 
 /// Risk-layer defaults applied to every symbol in the bot's config.
 ///
@@ -35,23 +36,38 @@ pub struct RiskConfig {
 
 /// Configuration for a [`Bot`].
 ///
-/// Construct via [`BotConfig::builder`]. The builder validates required
-/// fields on [`BotConfigBuilder::build`] — `Bot::new` does not double-check.
+/// Construct via [`BotConfig::builder`]. The builder validates every
+/// field on [`BotConfigBuilder::build`] and returns `Error::Config` on
+/// any violation — the framework never panics on bad config. `Bot::new`
+/// does a final brain-count check on top.
 #[derive(Debug, Clone)]
 pub struct BotConfig {
     /// Human-readable name used in logs, tracing spans, and supervisor
     /// service identification.
     pub name: String,
     /// Symbols this bot trades. Every symbol gets a pre-seeded entry in
-    /// the risk-state map and the position cache.
+    /// the risk-state map and the position cache. Must be non-empty —
+    /// the position cache and risk-state map would otherwise be empty,
+    /// which is a silent footgun.
     pub symbols: Vec<Symbol>,
-    /// Maximum time to wait for services to drain on shutdown.
+    /// Maximum time to wait for services to drain on shutdown. Must be
+    /// `> 0`; the supervisor's drain logic needs a non-zero deadline.
     pub shutdown_timeout: Duration,
     /// Whether the supervisor installs its own Ctrl-C / SIGTERM handler.
     /// Disable when the host service drives shutdown via [`BotHandle::shutdown`].
     pub install_signal_handler: bool,
-    /// Capacity of the in-process market-data broadcast bus.
+    /// Capacity of the in-process market-data broadcast bus. Backed by
+    /// `tokio::sync::broadcast`, which has **drop-oldest** semantics: a
+    /// slow subscriber that falls behind by more than `capacity` events
+    /// sees `RecvError::Lagged(n)` and the oldest dropped events are
+    /// gone. Size this to absorb the worst-case latency between
+    /// publish and slowest subscriber's `recv`.
     pub market_bus_capacity: usize,
+    /// Capacity of the in-process signal broadcast bus. Same drop-oldest
+    /// semantics as `market_bus_capacity`. Typically smaller — signals
+    /// are emitted ~once per non-Hold decision, far less frequent than
+    /// market events.
+    pub signal_bus_capacity: usize,
     /// On shutdown, attempt to close any open position for each symbol
     /// before exit, using `ExchangeClient::close_position`. Best-effort:
     /// failures are logged but do not propagate.
@@ -75,6 +91,7 @@ pub struct BotConfigBuilder {
     shutdown_timeout: Option<Duration>,
     install_signal_handler: Option<bool>,
     market_bus_capacity: Option<usize>,
+    signal_bus_capacity: Option<usize>,
     close_positions_on_shutdown: Option<bool>,
     risk: RiskConfig,
 }
@@ -117,6 +134,12 @@ impl BotConfigBuilder {
         self
     }
 
+    /// Override the in-process signal-bus capacity (default 256).
+    pub fn signal_bus_capacity(mut self, cap: usize) -> Self {
+        self.signal_bus_capacity = Some(cap);
+        self
+    }
+
     pub fn close_positions_on_shutdown(mut self, b: bool) -> Self {
         self.close_positions_on_shutdown = Some(b);
         self
@@ -141,28 +164,64 @@ impl BotConfigBuilder {
     }
 
     /// Validate and build. Returns `Error::Config` on any constraint
-    /// violation.
+    /// violation — the framework never panics on bad config.
     pub fn build(self) -> Result<BotConfig> {
         let name = self
             .name
             .filter(|n| !n.trim().is_empty())
             .ok_or_else(|| Error::config("BotConfig.name is required and must not be empty"))?;
 
-        let capacity = self
+        if self.symbols.is_empty() {
+            return Err(Error::config(
+                "BotConfig.symbols must contain at least one Symbol — \
+                 the position cache and risk-state map are pre-seeded per symbol",
+            ));
+        }
+
+        let market_bus_capacity = self
             .market_bus_capacity
             .unwrap_or(DEFAULT_MARKET_BUS_CAPACITY);
-        if capacity == 0 {
+        if market_bus_capacity == 0 {
             return Err(Error::config(
                 "BotConfig.market_bus_capacity must be > 0 (broadcast channel cannot have 0 slots)",
+            ));
+        }
+
+        let signal_bus_capacity = self
+            .signal_bus_capacity
+            .unwrap_or(DEFAULT_SIGNAL_BUS_CAPACITY);
+        if signal_bus_capacity == 0 {
+            return Err(Error::config(
+                "BotConfig.signal_bus_capacity must be > 0 (broadcast channel cannot have 0 slots)",
+            ));
+        }
+
+        let shutdown_timeout = self.shutdown_timeout.unwrap_or(Duration::from_secs(30));
+        if shutdown_timeout.is_zero() {
+            return Err(Error::config(
+                "BotConfig.shutdown_timeout must be > 0 — drain needs a non-zero deadline",
+            ));
+        }
+
+        if self.risk.session_pnl.loss_limit.is_nan() {
+            return Err(Error::config(
+                "BotConfig.risk.session_pnl.loss_limit must not be NaN",
+            ));
+        }
+        if !self.risk.sizing.margin_per_trade.is_finite() || self.risk.sizing.margin_per_trade < 0.0
+        {
+            return Err(Error::config(
+                "BotConfig.risk.sizing.margin_per_trade must be a finite non-negative number",
             ));
         }
 
         Ok(BotConfig {
             name,
             symbols: self.symbols,
-            shutdown_timeout: self.shutdown_timeout.unwrap_or(Duration::from_secs(30)),
+            shutdown_timeout,
             install_signal_handler: self.install_signal_handler.unwrap_or(true),
-            market_bus_capacity: capacity,
+            market_bus_capacity,
+            signal_bus_capacity,
             close_positions_on_shutdown: self.close_positions_on_shutdown.unwrap_or(false),
             risk: self.risk,
         })
@@ -220,7 +279,7 @@ impl Bot {
         ));
 
         let market_bus = MarketDataBus::with_capacity(config.market_bus_capacity);
-        let signal_bus = SignalBus::with_capacity(config.market_bus_capacity);
+        let signal_bus = SignalBus::with_capacity(config.signal_bus_capacity);
         let positions = build_position_cache(&config.symbols);
         let risk = build_risk_state(
             &config.symbols,
@@ -316,6 +375,39 @@ impl Bot {
     /// shutdown timeout elapses). Consumes `self` to make the
     /// "construct → run → exit" lifecycle explicit; persistent observation
     /// of the running bot is done via the [`BotHandle`] obtained earlier.
+    ///
+    /// # Runtime requirements
+    ///
+    /// - **Multi-thread tokio runtime.** The supervisor spawns each
+    ///   service onto `tokio::spawn`. A current-thread runtime works
+    ///   for small loads but loses the per-service parallelism the
+    ///   framework is designed for. Use
+    ///   `#[tokio::main(flavor = "multi_thread")]` or
+    ///   `tokio::runtime::Builder::new_multi_thread()` in the host.
+    /// - **`tokio::spawn` is used internally.** Anywhere the host
+    ///   embeds this method, a tokio runtime context must be active.
+    /// - **No nested runtimes.** `Bot::run_until_shutdown` is async; do
+    ///   not call `block_on` on it from inside another runtime.
+    ///
+    /// # Resource expectations
+    ///
+    /// - **Memory per active symbol:** O(few hundred bytes) for the
+    ///   position cache entry, `SymbolRisk` (a `SessionPnl` plus a
+    ///   `CircuitBreaker` whose ring buffer is bounded by
+    ///   `loss_limit`), plus the per-symbol slot in any host-owned
+    ///   subscriber.
+    /// - **Channel buffers:** `market_bus_capacity` + `signal_bus_capacity`
+    ///   slots per bus, each slot holding a clone of `MarketDataEvent` /
+    ///   `Signal`. Drop-oldest semantics — back-pressure is *not*
+    ///   propagated to publishers.
+    /// - **Expected shutdown time:** ≤ `shutdown_timeout`. A
+    ///   well-behaved service responds to its cancel token in
+    ///   milliseconds; the timeout is the worst-case bound, not the
+    ///   typical case.
+    /// - **Restart-after-crash latency:** bounded by
+    ///   [`BackoffConfig`](rustrade_supervisor::BackoffConfig). Defaults:
+    ///   100 ms base, 60 s cap, 10 retries within a 10-minute window
+    ///   before the circuit breaker trips.
     pub async fn run_until_shutdown(self) -> anyhow::Result<()> {
         tracing::info!(
             bot = %self.config.name,
@@ -520,10 +612,67 @@ mod tests {
     }
 
     #[test]
-    fn builder_rejects_zero_bus_capacity() {
+    fn builder_rejects_zero_market_bus_capacity() {
         let err = BotConfig::builder()
             .name("x")
+            .symbol("BTCUSDT")
             .market_bus_capacity(0)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn builder_rejects_zero_signal_bus_capacity() {
+        let err = BotConfig::builder()
+            .name("x")
+            .symbol("BTCUSDT")
+            .signal_bus_capacity(0)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn builder_rejects_empty_symbol_list() {
+        let err = BotConfig::builder().name("x").build().unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn builder_rejects_zero_shutdown_timeout() {
+        let err = BotConfig::builder()
+            .name("x")
+            .symbol("BTCUSDT")
+            .shutdown_timeout(Duration::ZERO)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn builder_rejects_nan_loss_limit() {
+        let err = BotConfig::builder()
+            .name("x")
+            .symbol("BTCUSDT")
+            .session_pnl_config(SessionPnlConfig {
+                loss_limit: f64::NAN,
+            })
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn builder_rejects_non_finite_margin() {
+        let err = BotConfig::builder()
+            .name("x")
+            .symbol("BTCUSDT")
+            .sizing_config(SizingConfig {
+                margin_per_trade: f64::INFINITY,
+                leverage: 1,
+                max_contracts: 1,
+            })
             .build()
             .unwrap_err();
         assert!(matches!(err, Error::Config(_)));
@@ -546,6 +695,7 @@ mod tests {
     fn builder_accepts_risk_overrides() {
         let c = BotConfig::builder()
             .name("x")
+            .symbol("BTCUSDT")
             .session_pnl_config(SessionPnlConfig { loss_limit: -123.0 })
             .sizing_config(SizingConfig {
                 margin_per_trade: 250.0,
@@ -556,6 +706,17 @@ mod tests {
             .unwrap();
         assert_eq!(c.risk.session_pnl.loss_limit, -123.0);
         assert_eq!(c.risk.sizing.leverage, 10);
+    }
+
+    #[test]
+    fn builder_has_separate_default_bus_capacities() {
+        let c = BotConfig::builder()
+            .name("x")
+            .symbol("BTCUSDT")
+            .build()
+            .unwrap();
+        assert_eq!(c.market_bus_capacity, 1024);
+        assert_eq!(c.signal_bus_capacity, 256);
     }
 
     #[tokio::test]
