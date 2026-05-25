@@ -10,6 +10,24 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Core trait surface lockdown (Phase 1, track 2).** `rustrade-core`
+  picks up:
+  - `Symbol` newtype gains `as_str()`, `AsRef<str>`, `Borrow<str>`,
+    `PartialEq<str>`, `PartialEq<&str>`, transparent serde.
+  - `Capability` enum + `ExchangeClient::supports(Capability) -> bool`
+    for adapter introspection (`StopOrders`, `PostOnly`, `ReduceOnly`,
+    `Ioc`, `Fok`, `PublicFeed`, `PrivateFeed`).
+  - `ExchangeClient::contract_value(&Symbol) -> f64` with a `1.0` default
+    so spot adapters need not override.
+  - `StopAttachment` + `StopKind` (`StopMarket`, `StopLimit`,
+    `TakeProfit`, `TrailingStop`) on `Order.stop`.
+  - 27 unit tests in `rustrade-core` (was zero) covering `Decision`
+    builders, `Position::close_side`, `Side::opposite`,
+    `MarketDataEvent::symbol/exchange` for every variant,
+    `Tick::mid_price/spread`, `Symbol` ergonomics, and serde roundtrips.
+  - Documented cancellation contract on `MarketSource::run` — the future
+    is dropped by the wrapping `TradingService`; implementors must be
+    drop-safe.
 - **Supervisor port (Phase 1, track 1).** `rustrade-supervisor` now has
   the full restart loop, exponential backoff with full jitter, per-service
   circuit breaker, lifecycle state machine, and graceful shutdown
@@ -30,6 +48,20 @@ version if you depend on `rustrade` before then.
   ([#1](https://github.com/nuniesmith/rustrade/pull/1)).
 
 ### Changed
+- **BREAKING (`rustrade-core`):** `Tick.symbol`, `Order.symbol`, and
+  `Fill.symbol` are now `Symbol` instead of `String`. `Order::market` /
+  `Order::limit` take `impl Into<Symbol>` (still accepts `&str` and
+  `String`).
+- **BREAKING (`rustrade-core`):** `ExchangeClient::cancel_all`,
+  `close_position`, and `get_position` take `&Symbol` instead of `&str`.
+- **BREAKING (`rustrade-core`):** `Brain::on_position_change` takes
+  `&Symbol` instead of `&str`.
+- **BREAKING (`rustrade-core`):** `Order` gains a new `stop:
+  Option<StopAttachment>` field. The `#[serde(default)]` means JSON from
+  older callers still deserializes, but the `Order { ... }` struct
+  literal must now include `stop: None` (or use the
+  `Order::market`/`Order::limit`/`Order::with_stop` builders, which
+  default it).
 - **BREAKING (`rustrade-supervisor`):** `BackoffConfig` field rename —
   `min_delay → base_delay`, `circuit_breaker_threshold → max_retries`,
   `circuit_breaker_cooldown → circuit_breaker_window`; new

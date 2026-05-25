@@ -8,8 +8,35 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::market::MarketDataEvent;
+use crate::market::{MarketDataEvent, Symbol};
 use crate::types::{Fill, Order, Position};
+
+/// Optional adapter capabilities, queried via [`ExchangeClient::supports`].
+///
+/// The framework consults this to degrade gracefully when an adapter
+/// doesn't implement a feature an [`Order`] or strategy requests — e.g.
+/// rejecting an order with `Order.stop = Some(...)` against an adapter
+/// that returns `false` for [`Capability::StopOrders`] rather than
+/// silently dropping the attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Capability {
+    /// Adapter accepts `Order.stop` and translates to native stop orders.
+    StopOrders,
+    /// Adapter rejects post-only orders that would cross the book as taker.
+    PostOnly,
+    /// Adapter honours `Order.reduce_only`.
+    ReduceOnly,
+    /// Adapter supports `OrderKind::Ioc`.
+    Ioc,
+    /// Adapter supports `OrderKind::Fok`.
+    Fok,
+    /// Adapter can stream a public market-data feed alongside trading.
+    /// Most do; spot-only HTTP adapters may not.
+    PublicFeed,
+    /// Adapter pushes fill / order-update events on a private feed.
+    PrivateFeed,
+}
 
 /// Status of an order as reported by the exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,31 +76,77 @@ pub trait ExchangeClient: Send + Sync + 'static {
     async fn place_order(&self, order: &Order) -> Result<String>;
 
     /// Cancel all open orders for a symbol. Returns the count cancelled.
-    async fn cancel_all(&self, symbol: &str) -> Result<usize>;
+    async fn cancel_all(&self, symbol: &Symbol) -> Result<usize>;
 
     /// Close the given position with a market order. Returns the exchange
     /// order id of the close.
-    async fn close_position(&self, symbol: &str, position: &Position) -> Result<String>;
+    async fn close_position(&self, symbol: &Symbol, position: &Position) -> Result<String>;
 
     /// Fetch the current position for a symbol (or `Position::FLAT` if flat).
-    async fn get_position(&self, symbol: &str) -> Result<Position>;
+    async fn get_position(&self, symbol: &Symbol) -> Result<Position>;
 
     /// Fetch the current balance in the given currency.
     async fn get_balance(&self, currency: &str) -> Result<f64>;
+
+    /// Does this adapter support the given optional capability?
+    ///
+    /// The default returns `false` for every variant — adapters opt in by
+    /// overriding. This is intentionally conservative: a new adapter that
+    /// forgets to override won't quietly accept orders it can't execute.
+    fn supports(&self, _capability: Capability) -> bool {
+        false
+    }
+
+    /// Base-asset units per one contract for the given symbol.
+    ///
+    /// For spot exchanges this is `1.0` for every symbol — one unit traded
+    /// equals one unit of the base asset. For futures, it's the contract
+    /// multiplier (e.g. `0.001` for KuCoin XBTUSDTM where one contract is
+    /// 0.001 BTC). The risk layer's
+    /// [`PositionSizer`](https://docs.rs/rustrade-risk/latest/rustrade_risk/sizing/struct.PositionSizer.html)
+    /// uses this to convert margin × leverage into a contract count.
+    ///
+    /// The default returns `1.0` — appropriate for spot adapters. Futures
+    /// adapters override.
+    fn contract_value(&self, _symbol: &Symbol) -> f64 {
+        1.0
+    }
 }
 
 /// A source of live market data (WebSocket feed, backtest replay, simulator).
 ///
-/// Implementors push events into the bot via the `rustrade-core::bus::MarketDataBus`
-/// that the supervisor creates. The `MarketSource` itself is modelled as a
-/// `TradingService` in `rustrade-supervisor` (so it gets lifecycle management
-/// and auto-restart); this trait exists just to document the contract.
+/// Implementors push events into the bot via the
+/// [`MarketDataBus`](crate::bus::MarketDataBus) that the supervisor creates.
+/// `MarketSource` is intended to be wrapped by a `TradingService` in
+/// `rustrade-supervisor` so it inherits lifecycle management and
+/// auto-restart; this trait just documents the contract on the data side.
+///
+/// # Cancellation contract
+///
+/// `run` does **not** take a `CancellationToken` directly. Cancellation is
+/// expected to flow through the wrapping `TradingService` — when the
+/// supervisor cancels that service's token, it drops the
+/// `MarketSource::run` future at its next `.await`.
+///
+/// Implementors must therefore be **drop-safe**: any open resources
+/// (WebSocket connections, HTTP sessions, file handles) must release
+/// cleanly when their containing future is dropped. In practice this
+/// means:
+///
+/// - Use `tokio::select!` against external events only inside your own
+///   loop, not against an externally-owned cancel signal here.
+/// - Don't hold a `MutexGuard` across an `.await` that could be dropped
+///   mid-flight — dropping a guard is fine, but holding one while the
+///   future is destructured can deadlock the lock.
+/// - If you need explicit teardown, perform it in a `Drop` impl on the
+///   implementing type rather than at the end of `run`.
 #[async_trait]
 pub trait MarketSource: Send + Sync + 'static {
     fn name(&self) -> &str;
 
-    /// Begin streaming events. Runs until the returned future completes
-    /// (typically never, unless the feed closes or is cancelled).
+    /// Begin streaming events. Should run until the feed terminates or
+    /// the caller drops the returned future (see the cancellation contract
+    /// in the trait docs).
     async fn run(&self) -> Result<()>;
 
     /// Is the feed currently receiving data?

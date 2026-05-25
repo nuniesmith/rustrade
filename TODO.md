@@ -98,23 +98,28 @@ Blocker for everything else. The facade can't be built on a stub supervisor.
 The traits in `rustrade-core` are the framework's public ABI for downstream
 crates. Breaking them post-0.1 hurts every dependent. Audit and lock now.
 
-- [ ] **Unit tests for `rustrade-core`.** Currently zero. Add at minimum:
-      `Decision` builder roundtrip, `Position::close_side` for all cases,
-      `Side::opposite` involution, `MarketDataEvent::symbol/exchange`
-      accessor for every variant, `Tick::mid_price/spread` arithmetic.
-- [ ] Replace `String` symbol fields with `Symbol` newtype for consistency:
-      `Tick.symbol`, `Order.symbol`, `Fill.symbol`, `ExchangeClient`
-      methods that take a `&str`. Picking one form everywhere prevents
-      future churn.
-- [ ] Decide and implement: **leverage** on `Order` vs per-adapter (see
-      decisions below).
-- [ ] Decide and implement: **stop orders** trait surface (see decisions).
-- [ ] Decide and implement: **contract multiplier** access (see decisions).
-- [ ] Add `ExchangeClient::supports(feature: Feature) -> bool` introspection
-      so the framework can degrade gracefully when an adapter doesn't
-      implement stops, reduce-only, post-only, etc.
-- [ ] Document the cancellation contract on `MarketSource::run` —
-      currently absent.
+- [x] **Unit tests for `rustrade-core`.** Added 27 unit tests covering
+      `Decision` builders, `Position::close_side`, `Side::opposite`,
+      `MarketDataEvent::symbol/exchange`, `Tick::mid_price/spread`,
+      `Symbol` ergonomics, `StopAttachment`/`StopKind` constructors,
+      and serde roundtrips for `Order`, `Decision`, `Signal`, `Symbol`.
+- [x] Replace `String` symbol fields with `Symbol` newtype for
+      consistency: `Tick.symbol`, `Order.symbol`, `Fill.symbol`, all
+      relevant `ExchangeClient` and `Brain` parameters.
+- [x] **Leverage:** per-adapter via constructor (decision (b) from below).
+      No change to `Order` — adapters configure leverage at construction.
+- [x] **Stop orders:** added `Order.stop: Option<StopAttachment>` carrying
+      a `StopKind` enum. Opaque to the framework; adapters interpret.
+- [x] **Contract multipliers:** added
+      `ExchangeClient::contract_value(&Symbol) -> f64` with a `1.0`
+      default. Spot adapters need not override.
+- [x] Add `ExchangeClient::supports(capability: Capability) -> bool`
+      introspection. Default returns `false` for every variant —
+      pessimistic, so a new adapter doesn't quietly accept orders it
+      can't execute.
+- [x] Document the cancellation contract on `MarketSource::run` — the
+      future is dropped by the wrapping `TradingService`; implementors
+      must be drop-safe (see updated trait docstring).
 
 ### Risk crate polish
 
@@ -263,19 +268,20 @@ demands once the basics work.
 
 ## Open design decisions
 
-Lift these from [`NEXT_STEPS.md §"Things to explicitly decide"`](./NEXT_STEPS.md).
-They block the trait lockdown in Phase 1 and the facade in Phase 2.
+Lifted from [`NEXT_STEPS.md §"Things to explicitly decide"`](./NEXT_STEPS.md).
 
-- [ ] **Leverage on orders.** Recommendation: per-adapter via constructor
-      for 0.1, revisit only if a real second adapter needs per-order.
-- [ ] **Stop orders.** Recommendation: `Order.stop: Option<StopAttachment>`
-      — adapters decide how to honour, framework treats as opaque.
-- [ ] **Contract multipliers.** Recommendation: add
-      `ExchangeClient::contract_value(symbol) -> f64`. Sizer drops the
-      explicit `contract_value` arg and pulls it from the adapter.
-- [ ] **Parameter overrides.** Recommendation: each subsystem owns its own
-      `*Overrides` struct; brain-specific params stay opaque to the
-      framework. Host services merge them however they want.
+- [x] **Leverage on orders.** Resolved: per-adapter via constructor. No
+      change to `Order`.
+- [x] **Stop orders.** Resolved: `Order.stop: Option<StopAttachment>` —
+      adapters interpret, framework treats as opaque. Gated by
+      `Capability::StopOrders`.
+- [x] **Contract multipliers.** Resolved: `ExchangeClient::contract_value(&Symbol)
+      -> f64` with a `1.0` default. The sizer continues to take an explicit
+      `contract_value` argument for now — wiring the adapter through is
+      the facade's job (Phase 2).
+- [ ] **Parameter overrides.** Deferred to Phase 2 (facade). The shape
+      lands when the `Bot`/`BotConfig` types do; risk and brain configs
+      already own their own structs.
 
 ---
 
