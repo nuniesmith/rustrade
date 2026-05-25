@@ -1,0 +1,7 @@
+[toolchain]
+# Pinned to the workspace's MSRV. CI matrices may add `stable` and `beta`
+# alongside this version; contributors should default to this exact channel
+# so reproducibility issues are caught locally before they hit review.
+channel    = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile    = "minimal"

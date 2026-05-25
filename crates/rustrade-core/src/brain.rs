@@ -171,7 +171,7 @@ impl BrainHealth {
 /// Methods take `&self` so implementors can be shared across tasks via `Arc`.
 /// Use interior mutability (`Mutex`, `RwLock`, atomics) for any state that
 /// needs to be updated across calls. This mirrors the pattern in
-/// [`rustrade-supervisor::TradingService`].
+/// `rustrade-supervisor::TradingService`.
 ///
 /// # Object safety
 ///

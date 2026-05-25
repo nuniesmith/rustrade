@@ -1,0 +1,3 @@
+# Match the workspace MSRV so clippy doesn't suggest features unavailable on
+# the pinned toolchain.
+msrv = "1.94.1"

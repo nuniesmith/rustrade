@@ -29,9 +29,7 @@ pub struct SessionPnlConfig {
 
 impl Default for SessionPnlConfig {
     fn default() -> Self {
-        Self {
-            loss_limit: -50.0,
-        }
+        Self { loss_limit: -50.0 }
     }
 }
 
@@ -221,7 +219,7 @@ mod tests {
         let mut p = SessionPnl::new("TEST", cfg(-1000.0));
         p.record_close(10.0, 1.0); // win
         p.record_close(-5.0, 1.0); // loss
-        p.record_close(1.0, 1.0);  // breakeven
+        p.record_close(1.0, 1.0); // breakeven
         assert!((p.win_rate() - 0.5).abs() < 1e-9);
     }
 }

@@ -1,0 +1,21 @@
+# Rust build artefacts
+target/
+**/*.rs.bk
+
+# IDEs / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local environment overrides
+.env
+.env.local

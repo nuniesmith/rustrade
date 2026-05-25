@@ -9,14 +9,14 @@
 //! # Porting checklist
 //!
 //! - [ ] Lift `JanusSupervisor::new`, `spawn_service`, `trigger_shutdown`,
-//!       `run_until_shutdown`, `wait_for_drain`.
+//!   `run_until_shutdown`, `wait_for_drain`.
 //! - [ ] Lift `SupervisorMetrics` atomics; gate the Prometheus `.inc()`
-//!       calls behind `#[cfg(feature = "prometheus")]`.
+//!   calls behind `#[cfg(feature = "prometheus")]`.
 //! - [ ] Lift the chaos tests (`test_chaos_backoff`,
-//!       `test_chaos_circuit_breaker_trips`, `test_chaos_mixed_fleet`).
+//!   `test_chaos_circuit_breaker_trips`, `test_chaos_mixed_fleet`).
 //! - [ ] Replace references to `crate::metrics::metrics()` with a local
-//!       prometheus registry wrapped in `OnceCell` inside this crate,
-//!       populated only when the `prometheus` feature is on.
+//!   prometheus registry wrapped in `OnceCell` inside this crate,
+//!   populated only when the `prometheus` feature is on.
 
 use std::collections::HashMap;
 use std::sync::Arc;
