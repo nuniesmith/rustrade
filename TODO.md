@@ -123,14 +123,18 @@ crates. Breaking them post-0.1 hurts every dependent. Audit and lock now.
 
 ### Risk crate polish
 
-- [ ] Add `proptest`-based property tests for `PositionSizer` (sizing must
-      be monotone in margin/leverage, capped by `max_contracts`, zero on
-      degenerate inputs).
-- [ ] Inject a clock into `CircuitBreaker` and `SessionPnl` so tests can
-      simulate the rolling window without `tokio::time::sleep`. Trait or
-      `Fn() -> u64` — small change, big test ergonomics win.
-- [ ] Verify `SessionPnl` UTC rollover with a clock injection test (the
-      current `last_reset_day` logic is plausible but untested).
+- [x] Added 7 `proptest`-based property tests for `PositionSizer`: cap
+      respected, monotone in margin, monotone in leverage, zero on every
+      degenerate input flavour, and matches `floor(margin·leverage /
+      (price·cv))` against a reference computation.
+- [x] Added `Clock` trait + `SystemClock` (default) + `ManualClock`
+      (tests) in the new `clock` module. `CircuitBreaker::with_clock`
+      and `SessionPnl::with_clock` constructors accept any `Arc<dyn
+      Clock>`; existing `::new` constructors keep the default
+      `SystemClock` so production code doesn't move.
+- [x] UTC rollover verified end-to-end via `ManualClock`-driven
+      `SessionPnl::tick()` test. Sliding-window eviction and cooldown
+      auto-reset on `CircuitBreaker::tick()` also covered.
 
 ## Phase 2 — Build the `rustrade` facade (~1–2 weeks)
 

@@ -10,6 +10,24 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Risk crate polish (Phase 1, track 3).** `rustrade-risk` picks up:
+  - New `clock` module: `Clock` trait, `SystemClock` (default impl),
+    `ManualClock` for tests. `Arc<C: Clock>` delegates so a single
+    `Arc<ManualClock>` can be shared between a test harness and the
+    risk primitive it drives.
+  - `CircuitBreaker::with_clock(...)` and `SessionPnl::with_clock(...)`
+    constructors. The existing `::new(...)` constructors are unchanged
+    and default to `SystemClock`, so production code does not need to
+    move.
+  - 7 proptest property tests for `PositionSizer`: cap is never
+    exceeded, all degenerate input flavours return zero, monotone in
+    margin, monotone in leverage, and the unsaturated result matches
+    `floor(margin·leverage / (price·cv))`.
+  - 5 new unit tests using `ManualClock` for `CircuitBreaker`
+    (sliding-window eviction, cooldown auto-reset on `tick()`,
+    spaced-out losses never trip) and `SessionPnl` (UTC rollover via
+    `tick()`, intra-day tick is a no-op).
+  - Risk crate now reports **29 unit tests + 3 doc tests** (was 13 + 2).
 - **Core trait surface lockdown (Phase 1, track 2).** `rustrade-core`
   picks up:
   - `Symbol` newtype gains `as_str()`, `AsRef<str>`, `Borrow<str>`,

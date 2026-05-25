@@ -14,9 +14,11 @@
 //! the `Brain` implementation, not here.
 
 pub mod circuit_breaker;
+pub mod clock;
 pub mod session_pnl;
 pub mod sizing;
 
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+pub use clock::{Clock, ManualClock, SystemClock};
 pub use session_pnl::{SessionPnl, SessionPnlConfig};
 pub use sizing::{PositionSizer, SizingConfig};
