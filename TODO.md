@@ -75,23 +75,22 @@ Blocker for everything else. The facade can't be built on a stub supervisor.
 
 ### Supervisor port — see [`NEXT_STEPS.md §1`](./NEXT_STEPS.md)
 
-- [ ] Lift `janus-core/supervisor/backoff.rs` verbatim into
+- [x] Lift `janus-core/supervisor/backoff.rs` verbatim into
       `crates/rustrade-supervisor/src/backoff.rs`. Replace placeholder.
-- [ ] Lift `janus-core/supervisor/lifecycle.rs` verbatim into
+- [x] Lift `janus-core/supervisor/lifecycle.rs` verbatim into
       `crates/rustrade-supervisor/src/lifecycle.rs`. Replace placeholder.
-- [ ] Lift `JanusSupervisor` from `janus-core/supervisor/mod.rs` into
-      `supervisor.rs`. Rename `JanusSupervisor → Supervisor`,
-      `JanusService → TradingService` (already done).
-- [ ] Gate every prometheus call behind `#[cfg(feature = "prometheus")]`.
-- [ ] Add a local `prometheus::Registry` in `OnceCell` — do NOT use a global
-      registry; host services may already own one.
-- [ ] Wire `TradingService::restart_policy()` into the supervisor's restart
-      decision (the trait method exists but supervisor ignores it today —
-      see `supervisor.rs:122`).
-- [ ] Fix the lifecycle insertion race in `supervisor.rs:131`. Inserting
-      the `ServiceLifecycle` in a spawned task means the service can crash
-      before the entry exists. Insert synchronously before `tracker.spawn`.
-- [ ] Port the three chaos tests verbatim: `test_chaos_backoff`,
+- [x] Lift `JanusSupervisor` from `janus-core/supervisor/mod.rs` into
+      `supervisor.rs`. Renamed to `Supervisor` / `TradingService`.
+- [x] Gate every prometheus call behind `#[cfg(feature = "prometheus")]`.
+- [x] Add a local `prometheus::Registry` in `OnceLock` — new
+      `crates/rustrade-supervisor/src/prometheus.rs`; host services
+      `gather()` from `prometheus::registry()` instead of a global registry.
+- [x] Wire `TradingService::restart_policy()` into the supervisor's
+      restart decision (`Always`, `OnFailure`, `Never` all honoured).
+- [x] Fix the lifecycle insertion race — the initial `ServiceLifecycle`
+      is now inserted synchronously inside `service_loop` before any work
+      starts.
+- [x] Port the three chaos tests verbatim: `test_chaos_exponential_backoff`,
       `test_chaos_circuit_breaker_trips`, `test_chaos_mixed_fleet`.
 
 ### Core trait surface lockdown

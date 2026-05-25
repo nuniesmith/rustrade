@@ -2,52 +2,54 @@
 //!
 //! Structured service lifecycle management for async trading bots.
 //!
-//! Every long-running task in a rustrade bot — market feeds, heartbeats,
-//! candle pollers, the brain itself — implements [`TradingService`] and is
-//! spawned through a [`Supervisor`]. The supervisor:
+//! Every long-running task in a rustrade bot — market feeds, candle
+//! pollers, heartbeats, brains — implements [`TradingService`] and is
+//! spawned through a [`Supervisor`] that:
 //!
 //! - Tracks running tasks without accumulating their results (uses
 //!   `TaskTracker` rather than `JoinSet`).
 //! - Propagates graceful shutdown via a root `CancellationToken` that
 //!   branches to each service.
-//! - Restarts failed services with exponential backoff and per-service
-//!   circuit breakers.
-//! - Surfaces lifecycle state (starting / running / restarting / terminated)
-//!   and metrics (restarts, active services, uptime) for observability.
+//! - Restarts failed services with exponential backoff plus full jitter
+//!   and per-service circuit breakers.
+//! - Surfaces lifecycle state (Starting / Running / BackingOff / Stopping
+//!   / Terminated) and metrics (restarts, active services, uptime) for
+//!   observability.
 //!
-//! # Why this design
+//! # Quickstart
 //!
-//! The naive `tokio::spawn` approach leaks tasks that silently die, makes
-//! graceful shutdown a nightmare, and has no concept of "this service failed
-//! 20 times in a row — stop retrying." This module replaces that pattern
-//! with a small supervision tree that makes failure modes explicit.
+//! ```rust,ignore
+//! use rustrade_supervisor::{Supervisor, SupervisorConfig, TradingService};
 //!
-//! # Port status
+//! let supervisor = Supervisor::new(SupervisorConfig::default());
+//! supervisor.spawn_service(Box::new(my_market_feed));
+//! supervisor.spawn_service(Box::new(my_risk_engine));
 //!
-//! > **This is a skeleton.** The real implementation should be lifted almost
-//! > verbatim from `janus-main/lib/janus-core/src/supervisor/`:
-//! >
-//! > - `service.rs`      → this crate's `service.rs`   (rename trait)
-//! > - `backoff.rs`      → this crate's `backoff.rs`   (no changes)
-//! > - `lifecycle.rs`    → this crate's `lifecycle.rs` (no changes)
-//! > - `mod.rs`          → this crate's `supervisor.rs` (rename struct)
-//! >
-//! > Changes to make during the port:
-//! > 1. Rename `JanusService` → [`TradingService`].
-//! > 2. Rename `JanusSupervisor` → [`Supervisor`].
-//! > 3. Gate the Prometheus integration behind the `prometheus` feature
-//! >    flag. The atomic counters in `SupervisorMetrics` stay as-is; the
-//! >    `crate::metrics::metrics()` calls move behind `#[cfg(feature = "prometheus")]`.
-//! > 4. Drop the `janus-core::metrics` module dependency entirely — the
-//! >    host binary registers its own Prometheus collectors if it wants them.
-//! > 5. Keep all the chaos tests. They're the best proof the supervisor works.
+//! // Blocks until Ctrl-C / SIGTERM, then orchestrates graceful shutdown.
+//! supervisor.run_until_shutdown().await?;
+//! ```
+//!
+//! # Observability
+//!
+//! Atomic counters in [`SupervisorMetrics`] are the in-process source of
+//! truth and are always available. Enable the `prometheus` feature to
+//! mirror them into a crate-local `prometheus::Registry` accessible via
+//! [`prometheus::registry`]. The host service serves
+//! `.gather()` from that registry in its `/metrics` handler — rustrade
+//! does not own an HTTP layer of its own.
 
 pub mod backoff;
 pub mod lifecycle;
+#[cfg(feature = "prometheus")]
+pub mod prometheus;
 pub mod service;
 pub mod supervisor;
 
 pub use backoff::{BackoffAction, BackoffConfig, BackoffState};
-pub use lifecycle::{ServiceLifecycle, ServicePhase, TerminationReason};
+pub use lifecycle::{
+    ServiceLifecycle, ServiceLifecycleSnapshot, ServicePhase, TerminationReason, TransitionError,
+};
 pub use service::{RestartPolicy, TradingService};
-pub use supervisor::{Supervisor, SupervisorConfig, SupervisorMetrics};
+pub use supervisor::{
+    MetricsSnapshot, SpawnOptions, Supervisor, SupervisorConfig, SupervisorMetrics,
+};
