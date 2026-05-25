@@ -15,8 +15,9 @@
 
 use std::sync::Arc;
 
-use rustrade_core::{Brain, Position, Symbol};
+use rustrade_core::{Brain, Position, Signal, SignalBus, Symbol};
 use rustrade_supervisor::{ServiceLifecycleSnapshot, Supervisor};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::risk_state::{PositionCache, RiskStateMap};
@@ -52,21 +53,24 @@ pub struct BotHandle {
     brains: Arc<Vec<Arc<dyn Brain>>>,
     risk: RiskStateMap,
     positions: PositionCache,
+    signals: SignalBus,
 }
 
 impl BotHandle {
     pub(crate) fn new(
         supervisor: Arc<Supervisor>,
-        brains: Vec<Arc<dyn Brain>>,
+        brains: Arc<Vec<Arc<dyn Brain>>>,
         risk: RiskStateMap,
         positions: PositionCache,
+        signals: SignalBus,
     ) -> Self {
         Self {
             cancel: supervisor.cancel_token().clone(),
             supervisor,
-            brains: Arc::new(brains),
+            brains,
             risk,
             positions,
+            signals,
         }
     }
 
@@ -132,6 +136,25 @@ impl BotHandle {
             .write()
             .await
             .insert(symbol.clone(), position);
+    }
+
+    /// Subscribe to the bot's signal stream.
+    ///
+    /// The [`ExecutionService`](crate::execution::ExecutionService)
+    /// publishes a [`Signal`] on every non-`Hold` decision a brain emits,
+    /// *before* the risk gates run. Subscribers see the strategic intent;
+    /// whether each signal was acted on is observable from order logs and
+    /// metrics.
+    ///
+    /// The underlying channel is `tokio::sync::broadcast`, so slow
+    /// subscribers will see `RecvError::Lagged(n)` if they fall behind.
+    pub fn subscribe_signals(&self) -> broadcast::Receiver<Signal> {
+        self.signals.subscribe()
+    }
+
+    /// Number of currently-attached signal subscribers.
+    pub fn signal_subscriber_count(&self) -> usize {
+        self.signals.subscriber_count()
     }
 
     /// Snapshot of bot-wide health.

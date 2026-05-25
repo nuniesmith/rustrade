@@ -10,6 +10,28 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Facade crate, observability + optional services (Phase 2c).**
+  - `Bot::with_external_cancel(token)` ties the bot's shutdown to a
+    host-owned `CancellationToken` — no host-side linker task needed.
+  - `Bot::with_market_source(Arc<dyn MarketSource>)` wires the source
+    into a supervised `MarketFeedService`.
+  - `Bot::with_fill_source(Arc<dyn FillSource>)` wires a
+    `FillRoutingService` that delivers each fill to every brain via
+    `Brain::on_fill` and refreshes the per-symbol position cache from
+    the exchange.
+  - New `signal_bus` on `Bot` (defaults to the same capacity as the
+    market bus). `BotHandle::subscribe_signals` returns a
+    `broadcast::Receiver<Signal>`. `ExecutionService` publishes a
+    `Signal` on every non-`Hold` decision *before* the risk gates
+    run — subscribers see strategic intent, whether each was acted on
+    is observable from order metrics.
+  - `BotHandle::signal_subscriber_count()` for diagnostics.
+  - `rustrade-core` now re-exports `FillSource` and `EventSource` from
+    its `lib.rs` (previously available only via the `exchange` module
+    path).
+  - 4 new integration tests in `tests/phase_2c.rs` covering external
+    cancellation, signal subscription, market-feed wiring, and
+    fill-routing end-to-end.
 - **Facade crate, risk-gated execution (Phase 2b).** Builds on the
   Phase 2a facade:
   - `RiskConfig` carrying `SessionPnlConfig`, `CircuitBreakerConfig`,

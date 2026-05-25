@@ -184,28 +184,37 @@ The crate downstream services actually depend on. Lives in
       / host code can feed PnL into the gates while the automated
       fill routing waits for Phase 2c.
 
-### Phase 2c — additional framework services + observability
+### Phase 2c — optional services + observability (this batch)
 
-- [ ] `MarketFeedService` — drives a `MarketSource`, publishes to bus.
-- [ ] `CandlePollerService` — periodic poll of an adapter (cadence
-      configurable per symbol), publishes candles to the bus.
-- [ ] `FillRoutingService` — consumes a `FillSource`, calls
-      `brain.on_fill`, refreshes the position cache, and auto-feeds
-      realised PnL into the risk state (replaces manual
-      `record_trade_outcome`).
-- [ ] Builder methods `Bot::with_market_source(...)` and
-      `Bot::with_fill_source(...)` so hosts wire the optional services.
+- [x] `MarketFeedService` — drives a `MarketSource` under supervisor
+      control. Wired via `Bot::with_market_source(...)`. Source
+      implementors publish to the bus they were constructed with.
+- [x] `FillRoutingService` — polls a `FillSource`, calls
+      `brain.on_fill` on every brain, and refreshes the per-symbol
+      position cache from `ExchangeClient::get_position`. Wired via
+      `Bot::with_fill_source(...)`. Auto-feed of realised PnL into the
+      risk state is deferred until entry-price-aware PnL accounting
+      lands; for now hosts continue to call `record_trade_outcome`.
+- [x] `BotHandle::subscribe_signals() -> broadcast::Receiver<Signal>`.
+      `ExecutionService` publishes on every non-`Hold` decision before
+      gates run.
+- [x] Externally-owned `CancellationToken` support via
+      `Bot::with_external_cancel(token)` — internal linker task,
+      no host-side glue required.
 
-### Phase 2c — observability ergonomics (combined with 2b's follow-ups)
+### Phase 2d — deferred
 
+- [ ] `CandlePollerService` — needs either a new `CandleSource` trait
+      or an extension to `ExchangeClient`. Defer until a real adapter
+      needs it.
 - [ ] `metrics::MetricsSink` trait so host services plug in their own
-      metrics backend instead of being forced onto Prometheus. The
-      `prometheus` feature provides a built-in impl.
-- [ ] `BotHandle::subscribe_signals() -> broadcast::Receiver<Signal>`
-      for host services that want to stream signals out.
-- [ ] Externally-owned `CancellationToken` support in `BotConfigBuilder`
-      so the host's shutdown sequence ties directly into the bot
-      without spawning a linker task.
+      metrics backend instead of being forced onto Prometheus. Defer
+      until the prometheus integration in `rustrade-supervisor` reveals
+      the right event shape.
+- [ ] Auto-feed realised PnL into the risk state from
+      `FillRoutingService`. Requires entry-price-aware accounting
+      (FIFO/LIFO, partial closes, fee handling) — punted to keep
+      Phase 2c reviewable.
 
 ## Phase 3 — Examples & end-to-end validation (~1 week)
 
