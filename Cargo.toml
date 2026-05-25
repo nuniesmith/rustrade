@@ -77,6 +77,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Observability (optional in downstream crates)
 prometheus = "0.14"
 
+# Randomness (used by supervisor backoff jitter)
+rand = "0.9"
+
 # Internal
 rustrade-core       = { path = "crates/rustrade-core",       version = "0.1.0" }
 rustrade-supervisor = { path = "crates/rustrade-supervisor", version = "0.1.0" }
