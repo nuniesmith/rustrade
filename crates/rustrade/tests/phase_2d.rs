@@ -274,15 +274,6 @@ async fn candle_poller_deduplicates_by_timestamp() {
 #[tokio::test]
 async fn metrics_sink_receives_fill_routing_counters() {
     let (exchange, _) = PositionTrackingExchange::new();
-    // Pre-seed a long position so the test's Sell fill realises PnL.
-    exchange.set_position(
-        Symbol::from("BTCUSDT"),
-        Position {
-            qty: 1.0,
-            entry_price: Some(100.0),
-            unrealised_pnl: 0.0,
-        },
-    );
 
     let sink = RecordingSink::new();
     let bot = Bot::new(
@@ -305,12 +296,35 @@ async fn metrics_sink_receives_fill_routing_counters() {
     let handle = bot.handle();
     let task = tokio::spawn(async move { bot.run_until_shutdown().await });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Seed the position cache deterministically via the handle.
+    // `Bot::run_until_shutdown`'s `prefetch_positions` runs
+    // concurrently with the test, so we set + verify in a loop until
+    // our seed survives a read-back (signalling prefetch is done).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let p = handle.position(&Symbol::from("BTCUSDT")).await;
+        if (p.qty - 1.0).abs() < 1e-9 && p.entry_price == Some(100.0) {
+            break;
+        }
+        handle
+            .set_position(
+                &Symbol::from("BTCUSDT"),
+                Position {
+                    qty: 1.0,
+                    entry_price: Some(100.0),
+                    unrealised_pnl: 0.0,
+                },
+            )
+            .await;
+        if tokio::time::Instant::now() > deadline {
+            panic!("failed to seed position cache");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
-    // After the bot prefetches the long position, send a Sell that
-    // closes at 110 (profit of +10) and a smaller fee of 0.5.
-    // After the close, set the exchange's position to FLAT so refresh
-    // sees it.
+    // After the close, the FillRoutingService refreshes from the
+    // exchange. Set the exchange to FLAT so that refresh produces a
+    // sensible post-close state.
     exchange.set_position(Symbol::from("BTCUSDT"), Position::FLAT);
     tx.send(make_fill("BTCUSDT", Side::Sell, 1.0, 110.0, 0.5))
         .unwrap();
@@ -336,14 +350,6 @@ async fn metrics_sink_receives_fill_routing_counters() {
 #[tokio::test]
 async fn fill_routing_auto_feeds_circuit_breaker_on_loss() {
     let (exchange, _) = PositionTrackingExchange::new();
-    exchange.set_position(
-        Symbol::from("BTCUSDT"),
-        Position {
-            qty: 1.0,
-            entry_price: Some(100.0),
-            unrealised_pnl: 0.0,
-        },
-    );
 
     let bot = Bot::new(
         BotConfig::builder()
@@ -364,12 +370,36 @@ async fn fill_routing_auto_feeds_circuit_breaker_on_loss() {
     )
     .unwrap();
 
-    let handle = bot.handle();
     let (fill_source, tx) = ChannelFillSource::new();
     let bot = bot.with_fill_source(fill_source);
+    let handle = bot.handle();
 
     let task = tokio::spawn(async move { bot.run_until_shutdown().await });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Seed the position cache deterministically via the handle.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if handle.position(&Symbol::from("BTCUSDT")).await.qty != 1.0 {
+            handle
+                .set_position(
+                    &Symbol::from("BTCUSDT"),
+                    Position {
+                        qty: 1.0,
+                        entry_price: Some(100.0),
+                        unrealised_pnl: 0.0,
+                    },
+                )
+                .await;
+        }
+        let p = handle.position(&Symbol::from("BTCUSDT")).await;
+        if (p.qty - 1.0).abs() < 1e-9 && p.entry_price == Some(100.0) {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("failed to seed position cache");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // Close at 90 — a -10 loss.
     exchange.set_position(Symbol::from("BTCUSDT"), Position::FLAT);
