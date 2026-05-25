@@ -1,0 +1,14 @@
+[package]
+name        = "sma-cross-bot"
+description = "Fast/slow SMA crossover Brain against a deterministic candle replay"
+version     = "0.0.0"
+edition.workspace      = true
+license.workspace      = true
+publish     = false
+
+[dependencies]
+rustrade    = { workspace = true }
+async-trait = { workspace = true }
+anyhow      = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }

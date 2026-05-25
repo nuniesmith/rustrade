@@ -10,6 +10,28 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Examples + end-to-end validation (Phase 3).** Four reference
+  embeddings in `examples/`, each a workspace member with its own
+  `Cargo.toml` so downstream services can clone the shape verbatim:
+  - `noop-bot` — minimum viable embedding. `NoopBrain` + mock exchange,
+    runs for `N` seconds (default 10), asserts no orders placed.
+  - `sma-cross-bot` — fast(5)/slow(20) SMA-crossover `Brain` against a
+    deterministic sinusoidal candle replay driven by a `MarketSource`.
+    Ships a `#[tokio::test]` that runs the same series twice and pins
+    down the order count for regression testing.
+  - `multi-brain-bot` — two `Brain`s in one `Bot`, each filtering events
+    to its own symbol. Asserts both brains see exactly the events for
+    their symbol.
+  - `embed-in-service` — host-service embedding pattern. Host owns the
+    runtime + shutdown `CancellationToken`; the bot is wired via
+    `Bot::with_external_cancel`; the host subscribes to signals and
+    publishes events to `bot.market_data_bus()`.
+- `BotHandle::subscribe_signals` now documents the subscriber-lifetime
+  pitfall — the channel does not close when the bot exits because
+  `BotHandle` keeps a `Sender` clone alive. Includes a `tokio::select!`
+  pattern subscribers should use.
+
+### Added
 - **Facade crate, observability + optional services (Phase 2c).**
   - `Bot::with_external_cancel(token)` ties the bot's shutdown to a
     host-owned `CancellationToken` — no host-side linker task needed.

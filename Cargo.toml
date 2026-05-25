@@ -39,8 +39,11 @@ members = [
     "crates/rustrade-supervisor",
     "crates/rustrade-risk",
     "crates/rustrade",
+    "examples/noop-bot",
+    "examples/sma-cross-bot",
+    "examples/multi-brain-bot",
+    "examples/embed-in-service",
     # "crates/rustrade-backtest",  # uncomment when Cargo.toml added
-    # "examples/noop-bot",         # uncomment when Cargo.toml added
 ]
 resolver = "3"
 

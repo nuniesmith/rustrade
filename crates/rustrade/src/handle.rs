@@ -148,6 +148,27 @@ impl BotHandle {
     ///
     /// The underlying channel is `tokio::sync::broadcast`, so slow
     /// subscribers will see `RecvError::Lagged(n)` if they fall behind.
+    ///
+    /// # Subscriber lifetime
+    ///
+    /// Because `BotHandle` keeps a `Sender` clone alive, the channel
+    /// does **not** close when the bot exits. A subscriber that loops on
+    /// `recv()` will block forever after shutdown unless it also watches
+    /// a cancellation signal:
+    ///
+    /// ```ignore
+    /// let mut rx = handle.subscribe_signals();
+    /// let shutdown = host.shutdown_token();
+    /// loop {
+    ///     tokio::select! {
+    ///         _ = shutdown.cancelled() => break,
+    ///         r = rx.recv() => match r {
+    ///             Ok(sig) => handle_signal(sig),
+    ///             Err(_)  => break,
+    ///         },
+    ///     }
+    /// }
+    /// ```
     pub fn subscribe_signals(&self) -> broadcast::Receiver<Signal> {
         self.signals.subscribe()
     }
