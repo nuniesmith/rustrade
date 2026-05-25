@@ -113,6 +113,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "embed-in-service"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "rustrade",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -293,6 +306,29 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys",
+]
+
+[[package]]
+name = "multi-brain-bot"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "rustrade",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "noop-bot"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "rustrade",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -673,6 +709,17 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "sma-cross-bot"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "rustrade",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "smallvec"

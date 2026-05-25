@@ -216,24 +216,27 @@ The crate downstream services actually depend on. Lives in
       (FIFO/LIFO, partial closes, fee handling) — punted to keep
       Phase 2c reviewable.
 
-## Phase 3 — Examples & end-to-end validation (~1 week)
+## Phase 3 — Examples & end-to-end validation
 
 Examples are the framework's UX. They double as integration tests.
 
-- [ ] `examples/noop-bot/` — `NoopBrain` (always `Decision::hold`), mock
-      `ExchangeClient`. Runs 10 s, shuts down on Ctrl-C, asserts no orders
-      placed. This is the smallest possible "framework works" demo.
-- [ ] `examples/sma-cross-bot/` — toy SMA crossover brain against a
-      deterministic candle replay. Validates the live execution path and
-      produces reproducible PnL.
-- [ ] `examples/multi-brain-bot/` — two brains, one symbol each, same
-      `Bot`. Validates the multi-`Arc<dyn Brain>` plumbing.
-- [ ] `examples/embed-in-service/` — host service with its own tokio
-      runtime and `CancellationToken` that drives the bot via `BotHandle`.
-      This is the reference for downstream consumers.
-- [ ] Integration test harness in `crates/rustrade/tests/` that boots a
-      bot with a scripted mock exchange and asserts on the sequence of
-      orders placed.
+- [x] `examples/noop-bot/` — `NoopBrain` (always `Decision::hold`), mock
+      `ExchangeClient`. Runs for N seconds (default 10), shuts down via
+      `BotHandle::shutdown`, asserts no orders placed.
+- [x] `examples/sma-cross-bot/` — fast(5)/slow(20) SMA-crossover brain
+      against a deterministic sinusoidal candle replay driven by a
+      `MarketSource`. Ships a `#[tokio::test]` that pins down the order
+      count for regression testing.
+- [x] `examples/multi-brain-bot/` — two brains, each filtering events
+      to its own symbol. Asserts per-brain event counts.
+- [x] `examples/embed-in-service/` — host service with its own tokio
+      runtime and `CancellationToken` that drives the bot via
+      `Bot::with_external_cancel` + `bot.market_data_bus()` +
+      `BotHandle::subscribe_signals`. Reference for downstream consumers.
+- [x] Integration test harness already in place from Phase 2:
+      `bot_lifecycle.rs`, `risk_gates.rs`, `phase_2c.rs` boot a bot with
+      a scripted mock exchange and assert on the sequence of orders /
+      signals / lifecycle events.
 
 ## Phase 4 — Backtest engine (~1–2 weeks)
 
