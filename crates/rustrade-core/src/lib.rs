@@ -16,9 +16,9 @@
 //!
 //! # What does NOT live here
 //!
-//! - Service lifecycle / supervision → [`rustrade-supervisor`]
-//! - Risk calculations → [`rustrade-risk`]
-//! - Backtest replay → [`rustrade-backtest`]
+//! - Service lifecycle / supervision → `rustrade-supervisor`
+//! - Risk calculations → `rustrade-risk`
+//! - Backtest replay → `rustrade-backtest`
 //! - Exchange clients → separate crates (e.g. `exchange-apiws`)
 //! - Indicator implementations → separate crates (e.g. `indicators-ta`)
 //!

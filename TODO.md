@@ -52,20 +52,22 @@ The framework is shippable when **all** of these are true:
 
 Cheap items that make everything else easier. Do these first.
 
-- [ ] Add `.gitignore` covering `target/`, `Cargo.lock` (workspace lock —
-      keep it; only ignore for library crates), `.idea/`, `.vscode/`,
-      `*.swp`, `.DS_Store`, `*.log`.
-- [ ] Pin `rust-toolchain.toml` to `1.94.1` (matches workspace MSRV).
-- [ ] Fix duplicated `# rustrade` heading at bottom of `README.md`
-      (line 184 is a leftover).
-- [ ] Add `CHANGELOG.md` (Keep-a-Changelog format, `Unreleased` section).
-- [ ] Add `CONTRIBUTING.md` with: build/test commands, branch naming,
-      commit-message convention, "no merge commits" rule if you want one.
-- [ ] Add per-crate `README.md` stubs (Cargo manifest already references
-      `readme = "README.md"` for core).
-- [ ] Add `.editorconfig` (4-space indent, LF, final newline).
-- [ ] Add `rustfmt.toml` (edition 2024, max_width 100, group_imports).
-- [ ] Add `clippy.toml` if you want any lint thresholds.
+- [x] Add `.gitignore` covering `target/`, `.idea/`, `.vscode/`, `*.swp`,
+      `.DS_Store`, `*.log`. `Cargo.lock` is committed (workspace has
+      planned binaries).
+- [x] Pin `rust-toolchain.toml` to `1.94.1` (matches workspace MSRV).
+- [x] Fix duplicated `# rustrade` heading at bottom of `README.md`
+      (line 184 was a leftover).
+- [x] Add `CHANGELOG.md` (Keep-a-Changelog format, `Unreleased` section).
+- [x] Add `CONTRIBUTING.md` with: build/test commands, branch naming,
+      commit-message convention, "no merge commits inside feature
+      branches" rule.
+- [x] Add per-crate `README.md` stubs and wire `readme = "README.md"`
+      into each `Cargo.toml`.
+- [x] Add `.editorconfig` (4-space indent, LF, final newline).
+- [x] Add `rustfmt.toml` (edition 2024, max_width 100; nightly-only
+      `group_imports`/`imports_granularity` documented as comments).
+- [x] Add `clippy.toml` with `msrv = "1.94.1"`.
 
 ## Phase 1 — Finish the framework (~1 week)
 

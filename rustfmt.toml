@@ -1,0 +1,14 @@
+# Stable options — applied by `cargo fmt` on the pinned toolchain.
+edition          = "2024"
+max_width        = 100
+newline_style    = "Unix"
+reorder_imports  = true
+reorder_modules  = true
+
+# Nightly-only options. Listed here as the intended style; they are no-ops on
+# stable but take effect when contributors run `cargo +nightly fmt`. The code
+# already follows this layout by hand, so removing the comment guard once
+# rustfmt stabilises these will be a no-op diff.
+#
+# group_imports       = "StdExternalCrate"
+# imports_granularity = "Module"
