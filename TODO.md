@@ -165,25 +165,38 @@ The crate downstream services actually depend on. Lives in
 - [x] Integration tests in `crates/rustrade/tests/bot_lifecycle.rs`
       against the public API only.
 
-### Phase 2b — real framework services
+### Phase 2b — risk-gated execution (this batch)
+
+- [x] Expand `ExecutionService`: wire `Decision` through the risk
+      gates in this order — `SessionPnl::is_session_halted` →
+      `CircuitBreaker::is_tripped` → `PositionSizer::contracts` →
+      `ExchangeClient::place_order`. Each gate emits a structured
+      `tracing` event on block.
+- [x] Position-cache (`PositionCache`) prefetched on `Bot::run_until_shutdown`
+      startup via `exchange.get_position(symbol)`. `ExecutionService`
+      reads it before each `brain.on_event` call.
+- [x] `RiskConfig` (session-PnL + circuit-breaker + sizing) in
+      `BotConfig` with builder methods. Per-symbol overrides deferred
+      to a future phase.
+- [x] Wire `Bot::config().close_positions_on_shutdown` to a real
+      close-on-stop hook via `ExchangeClient::close_position`.
+- [x] `BotHandle::record_trade_outcome(symbol, gross, fee)` so brains
+      / host code can feed PnL into the gates while the automated
+      fill routing waits for Phase 2c.
+
+### Phase 2c — additional framework services + observability
 
 - [ ] `MarketFeedService` — drives a `MarketSource`, publishes to bus.
 - [ ] `CandlePollerService` — periodic poll of an adapter (cadence
       configurable per symbol), publishes candles to the bus.
 - [ ] `FillRoutingService` — consumes a `FillSource`, calls
-      `brain.on_fill`, updates `SessionPnl` per symbol.
-- [ ] Expand `ExecutionService`: wire `Decision` through the risk
-      gates in this order — `SessionPnl::is_session_halted` →
-      `CircuitBreaker::is_tripped` → `PositionSizer::contracts` →
-      `ExchangeClient::place_order`. Each gate emits a structured
-      `tracing` event on block.
-- [ ] Position-cache so `brain.on_event` sees the actual position for
-      its symbol instead of `Position::FLAT`.
-- [ ] Wire `Bot::config().close_positions_on_shutdown` to a real
-      close-on-stop hook that uses `ExchangeClient::close_position` for
-      each non-flat position.
+      `brain.on_fill`, refreshes the position cache, and auto-feeds
+      realised PnL into the risk state (replaces manual
+      `record_trade_outcome`).
+- [ ] Builder methods `Bot::with_market_source(...)` and
+      `Bot::with_fill_source(...)` so hosts wire the optional services.
 
-### Phase 2c — observability ergonomics
+### Phase 2c — observability ergonomics (combined with 2b's follow-ups)
 
 - [ ] `metrics::MetricsSink` trait so host services plug in their own
       metrics backend instead of being forced onto Prometheus. The

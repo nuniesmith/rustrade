@@ -7,13 +7,26 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustrade_core::{Brain, Error, ExchangeClient, MarketDataBus, Result, Symbol};
+use rustrade_core::{Brain, Error, ExchangeClient, MarketDataBus, Position, Result, Symbol};
+use rustrade_risk::{CircuitBreakerConfig, SessionPnlConfig, SizingConfig};
 use rustrade_supervisor::{Supervisor, SupervisorConfig};
 
-use crate::execution::ExecutionService;
+use crate::execution::{ExecutionContext, ExecutionService};
 use crate::handle::BotHandle;
+use crate::risk_state::{PositionCache, RiskStateMap, build_position_cache, build_risk_state};
 
 const DEFAULT_MARKET_BUS_CAPACITY: usize = 1024;
+
+/// Risk-layer defaults applied to every symbol in the bot's config.
+///
+/// Per-symbol overrides are a Phase 2c concern — for now every configured
+/// symbol gets the same `SessionPnl`, `CircuitBreaker`, and `PositionSizer`.
+#[derive(Debug, Clone, Default)]
+pub struct RiskConfig {
+    pub session_pnl: SessionPnlConfig,
+    pub circuit_breaker: CircuitBreakerConfig,
+    pub sizing: SizingConfig,
+}
 
 /// Configuration for a [`Bot`].
 ///
@@ -24,8 +37,8 @@ pub struct BotConfig {
     /// Human-readable name used in logs, tracing spans, and supervisor
     /// service identification.
     pub name: String,
-    /// Symbols this bot trades. Brains may filter further; framework
-    /// services (candle pollers, etc.) use this as their primary input.
+    /// Symbols this bot trades. Every symbol gets a pre-seeded entry in
+    /// the risk-state map and the position cache.
     pub symbols: Vec<Symbol>,
     /// Maximum time to wait for services to drain on shutdown.
     pub shutdown_timeout: Duration,
@@ -35,9 +48,11 @@ pub struct BotConfig {
     /// Capacity of the in-process market-data broadcast bus.
     pub market_bus_capacity: usize,
     /// On shutdown, attempt to close any open position for each symbol
-    /// before exit. **Not yet implemented in Phase 2a** — the field is
-    /// reserved so callers can wire it now.
+    /// before exit, using `ExchangeClient::close_position`. Best-effort:
+    /// failures are logged but do not propagate.
     pub close_positions_on_shutdown: bool,
+    /// Risk-layer defaults applied to every configured symbol.
+    pub risk: RiskConfig,
 }
 
 impl BotConfig {
@@ -56,6 +71,7 @@ pub struct BotConfigBuilder {
     install_signal_handler: Option<bool>,
     market_bus_capacity: Option<usize>,
     close_positions_on_shutdown: Option<bool>,
+    risk: RiskConfig,
 }
 
 impl BotConfigBuilder {
@@ -101,6 +117,24 @@ impl BotConfigBuilder {
         self
     }
 
+    /// Override the session-PnL config used for every symbol.
+    pub fn session_pnl_config(mut self, cfg: SessionPnlConfig) -> Self {
+        self.risk.session_pnl = cfg;
+        self
+    }
+
+    /// Override the circuit-breaker config used for every symbol.
+    pub fn circuit_breaker_config(mut self, cfg: CircuitBreakerConfig) -> Self {
+        self.risk.circuit_breaker = cfg;
+        self
+    }
+
+    /// Override the position-sizing config used for every symbol.
+    pub fn sizing_config(mut self, cfg: SizingConfig) -> Self {
+        self.risk.sizing = cfg;
+        self
+    }
+
     /// Validate and build. Returns `Error::Config` on any constraint
     /// violation.
     pub fn build(self) -> Result<BotConfig> {
@@ -125,6 +159,7 @@ impl BotConfigBuilder {
             install_signal_handler: self.install_signal_handler.unwrap_or(true),
             market_bus_capacity: capacity,
             close_positions_on_shutdown: self.close_positions_on_shutdown.unwrap_or(false),
+            risk: self.risk,
         })
     }
 }
@@ -141,6 +176,8 @@ pub struct Bot {
     exchange: Arc<dyn ExchangeClient>,
     brains: Vec<Arc<dyn Brain>>,
     market_bus: MarketDataBus,
+    positions: PositionCache,
+    risk: RiskStateMap,
     handle: BotHandle,
 }
 
@@ -174,9 +211,19 @@ impl Bot {
         ));
 
         let market_bus = MarketDataBus::with_capacity(config.market_bus_capacity);
+        let positions = build_position_cache(&config.symbols);
+        let risk = build_risk_state(
+            &config.symbols,
+            &config.risk.session_pnl,
+            &config.risk.circuit_breaker,
+        );
 
-        let brain_names: Vec<String> = brains.iter().map(|b| b.name().to_string()).collect();
-        let handle = BotHandle::new(supervisor.clone(), brains.clone(), brain_names);
+        let handle = BotHandle::new(
+            supervisor.clone(),
+            brains.clone(),
+            risk.clone(),
+            positions.clone(),
+        );
 
         Ok(Self {
             config,
@@ -184,6 +231,8 @@ impl Bot {
             exchange,
             brains,
             market_bus,
+            positions,
+            risk,
             handle,
         })
     }
@@ -221,22 +270,27 @@ impl Bot {
             "rustrade Bot starting"
         );
 
+        // Best-effort position prefetch — failures don't block startup.
+        self.prefetch_positions().await;
+
+        let sizing = Arc::new(self.config.risk.sizing.clone());
+        let ctx = ExecutionContext {
+            exchange: self.exchange.clone(),
+            bus: self.market_bus.clone(),
+            positions: self.positions.clone(),
+            risk: self.risk.clone(),
+            sizing,
+        };
+
         for brain in &self.brains {
-            let svc = ExecutionService::new(
-                brain.clone(),
-                self.exchange.clone(),
-                self.market_bus.clone(),
-            );
+            let svc = ExecutionService::new(brain.clone(), ctx.clone());
             self.supervisor.spawn_service(Box::new(svc));
         }
 
-        let result = self.supervisor.run_until_shutdown().await;
+        let run_result = self.supervisor.run_until_shutdown().await;
 
         if self.config.close_positions_on_shutdown {
-            tracing::warn!(
-                "close_positions_on_shutdown is enabled but not yet implemented \
-                 — Phase 2b will wire the close-on-stop hook"
-            );
+            self.close_open_positions().await;
         }
 
         for brain in &self.brains {
@@ -251,7 +305,61 @@ impl Bot {
         }
 
         tracing::info!(bot = %self.config.name, "rustrade Bot exited");
-        result
+        run_result
+    }
+
+    async fn prefetch_positions(&self) {
+        for symbol in &self.config.symbols {
+            match self.exchange.get_position(symbol).await {
+                Ok(pos) => {
+                    self.positions.write().await.insert(symbol.clone(), pos);
+                    tracing::debug!(
+                        symbol = %symbol,
+                        qty = pos.qty,
+                        "prefetched position from exchange"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        symbol = %symbol,
+                        error = %e,
+                        "failed to prefetch position; cache defaults to FLAT"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn close_open_positions(&self) {
+        let snapshot: Vec<(Symbol, Position)> = {
+            let map = self.positions.read().await;
+            map.iter()
+                .filter(|(_, p)| !p.is_flat())
+                .map(|(s, p)| (s.clone(), *p))
+                .collect()
+        };
+
+        if snapshot.is_empty() {
+            tracing::info!("close_positions_on_shutdown: no open positions");
+            return;
+        }
+
+        for (symbol, position) in snapshot {
+            match self.exchange.close_position(&symbol, &position).await {
+                Ok(order_id) => tracing::info!(
+                    symbol = %symbol,
+                    qty = position.qty,
+                    order_id = %order_id,
+                    "close_positions_on_shutdown: closed"
+                ),
+                Err(e) => tracing::error!(
+                    symbol = %symbol,
+                    qty = position.qty,
+                    error = %e,
+                    "close_positions_on_shutdown: failed (best-effort)"
+                ),
+            }
+        }
     }
 }
 
@@ -352,10 +460,24 @@ mod tests {
         assert_eq!(c.symbols[2], Symbol::new("C"));
     }
 
+    #[test]
+    fn builder_accepts_risk_overrides() {
+        let c = BotConfig::builder()
+            .name("x")
+            .session_pnl_config(SessionPnlConfig { loss_limit: -123.0 })
+            .sizing_config(SizingConfig {
+                margin_per_trade: 250.0,
+                leverage: 10,
+                max_contracts: 5,
+            })
+            .build()
+            .unwrap();
+        assert_eq!(c.risk.session_pnl.loss_limit, -123.0);
+        assert_eq!(c.risk.sizing.leverage, 10);
+    }
+
     #[tokio::test]
     async fn bot_requires_at_least_one_brain() {
-        // `Bot` doesn't impl Debug (holds trait objects without Debug),
-        // so use a match instead of unwrap_err here.
         match Bot::new(cfg(), Arc::new(NoopExchange), vec![]) {
             Err(Error::Config(_)) => {}
             other => panic!(
@@ -371,12 +493,10 @@ mod tests {
         let handle = bot.handle();
         assert!(!handle.is_shutting_down());
         assert_eq!(bot.config().name, "test");
-        // Cloning the handle is cheap and yields the same logical handle.
         let h2 = handle.clone();
         assert!(!h2.is_shutting_down());
     }
 
-    // Suppress unused-warnings for fields the noop test impl doesn't touch.
     #[allow(dead_code)]
     fn _noop_fill_compiles(_: &Fill) {}
 }
