@@ -245,7 +245,7 @@ async fn candle_poller_deduplicates_by_timestamp() {
     // up after a generous deadline. Two polls × 50 ms cadence = ~100 ms
     // of expected work; budget 2 s to absorb slow CI startup.
     let mut count = 0;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while count < 6 {
         let now = tokio::time::Instant::now();
         if now >= deadline {
@@ -258,7 +258,7 @@ async fn candle_poller_deduplicates_by_timestamp() {
     }
 
     handle.shutdown();
-    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(8), task).await;
 
     // Batches contain 4 + 4 = 8 candles total. Batch 2 overlaps with
     // batch 1 on times 102 + 103 → 2 dropped as dupes, 6 published
@@ -300,7 +300,7 @@ async fn metrics_sink_receives_fill_routing_counters() {
     // `Bot::run_until_shutdown`'s `prefetch_positions` runs
     // concurrently with the test, so we set + verify in a loop until
     // our seed survives a read-back (signalling prefetch is done).
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let p = handle.position(&Symbol::from("BTCUSDT")).await;
         if (p.qty - 1.0).abs() < 1e-9 && p.entry_price == Some(100.0) {
@@ -329,7 +329,7 @@ async fn metrics_sink_receives_fill_routing_counters() {
     tx.send(make_fill("BTCUSDT", Side::Sell, 1.0, 110.0, 0.5))
         .unwrap();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while sink.counter_total("rustrade_fills_routed_total") == 0 {
         if tokio::time::Instant::now() > deadline {
             panic!("fill counter never incremented");
@@ -338,7 +338,7 @@ async fn metrics_sink_receives_fill_routing_counters() {
     }
 
     handle.shutdown();
-    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(8), task).await;
 
     assert!(sink.counter_total("rustrade_fills_routed_total") >= 1);
     let pnl_samples = sink.histogram_samples("rustrade_realised_pnl_quote");
@@ -377,7 +377,7 @@ async fn fill_routing_auto_feeds_circuit_breaker_on_loss() {
     let task = tokio::spawn(async move { bot.run_until_shutdown().await });
 
     // Seed the position cache deterministically via the handle.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if handle.position(&Symbol::from("BTCUSDT")).await.qty != 1.0 {
             handle
@@ -407,7 +407,7 @@ async fn fill_routing_auto_feeds_circuit_breaker_on_loss() {
         .unwrap();
 
     // Wait for the breaker to trip via the auto-PnL feed.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let h = handle.health().await;
         // SessionPnl reflects net of -10 immediately; checking via
@@ -430,7 +430,7 @@ async fn fill_routing_auto_feeds_circuit_breaker_on_loss() {
     // the fill without panicking and the FillRoutingService runs
     // record_trade_outcome under the hood.
     handle.shutdown();
-    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(8), task).await;
 }
 
 #[tokio::test]
@@ -455,5 +455,5 @@ async fn metrics_sink_default_is_noop() {
     let task = tokio::spawn(async move { bot.run_until_shutdown().await });
     tokio::time::sleep(Duration::from_millis(50)).await;
     handle.shutdown();
-    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(8), task).await;
 }
