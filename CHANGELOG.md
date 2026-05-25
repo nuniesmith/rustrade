@@ -10,6 +10,35 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Backtest engine, Phase 4b — CSV loader + Sharpe/Sortino + multi-symbol.**
+  - CSV candle loader: `load_csv` (path), `load_csv_str` (in-memory),
+    and `sort_chronological` for newest-first sources. Fixed
+    `time,open,high,low,close,volume` column layout, `#` comments and
+    blank lines skipped, malformed rows surface as `Error::Config`
+    with a 1-based row index.
+  - `BacktestResult.sharpe_ratio()` and `.sortino_ratio()` driven by
+    per-candle equity sampling. New `BacktestResult.equity_curve` and
+    `period_returns` fields; new `BacktestConfig.risk_free_rate`
+    (default `0.0`) and `periods_per_year` (default `252`)
+    annualisation knobs. Both ratios return `None` when undefined
+    (fewer than two samples, zero variance for Sharpe, no downside
+    for Sortino).
+  - Multi-symbol replay. `BacktestConfig.symbols: Vec<Symbol>` (the
+    old `symbol` field is gone; use `BacktestConfig::symbol()` for
+    single-symbol access). `BacktestConfigBuilder::symbols(iter)` for
+    multi-symbol configs; the existing `.symbol(...)` method still
+    works as a single-symbol shorthand. New
+    `Backtest::with_symbol_candles(symbol, candles)` attaches a series
+    per symbol; the engine merges all series chronologically before
+    replay and maintains independent `Position` state per symbol
+    against one shared cash balance. The brain sees the global
+    event stream and is responsible for any per-symbol filtering.
+  - 5 new integration tests in `crates/rustrade-backtest/tests/phase_4b.rs`
+    covering CSV → engine end-to-end, chronological sorting, multi-symbol
+    routing, chronological merge across symbols, and finite Sharpe /
+    Sortino on a synthetic replay. Unit tests expand to 31 (was 15).
+
+### Added
 - **Framework observability + candle polling + auto-PnL (Phase 2d).**
   - `MetricsSink` trait in `rustrade-core` with default `NoopSink`.
     `Bot::with_metrics(Arc<dyn MetricsSink>)` plugs in a host-owned
@@ -275,6 +304,21 @@ version if you depend on `rustrade` before then.
   ([#1](https://github.com/nuniesmith/rustrade/pull/1)).
 
 ### Changed
+- **BREAKING (`rustrade-backtest`):** `BacktestConfig.symbol: Symbol`
+  is now `symbols: Vec<Symbol>`. For single-symbol callers the builder
+  is unchanged (`.symbol("X")` still works); use
+  `BacktestConfig::symbol()` to read the (single) configured symbol
+  back. `BacktestResult.symbol` is now a comma-separated string in
+  multi-symbol configs.
+- **BREAKING (`rustrade-backtest`):** `BacktestConfig` gained
+  `risk_free_rate: f64` and `periods_per_year: u32` fields with
+  defaults `0.0` and `252`. Struct-literal constructors must include
+  them; the builder API is unchanged.
+- **BREAKING (`rustrade-backtest`):** `BacktestResult` gained
+  `equity_curve: Vec<f64>`, `period_returns: Vec<f64>`,
+  `risk_free_rate: f64`, and `periods_per_year: u32` fields. Hosts
+  that build a `BacktestResult` directly (uncommon — the engine is
+  the only producer in the wild) must populate them.
 - **BREAKING (`rustrade-core`):** `Tick.symbol`, `Order.symbol`, and
   `Fill.symbol` are now `Symbol` instead of `String`. `Order::market` /
   `Order::limit` take `impl Into<Symbol>` (still accepts `&str` and

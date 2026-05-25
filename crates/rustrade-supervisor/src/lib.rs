@@ -36,9 +36,10 @@
 //! Atomic counters in [`SupervisorMetrics`] are the in-process source of
 //! truth and are always available. Enable the `prometheus` feature to
 //! mirror them into a crate-local `prometheus::Registry` accessible via
-//! [`prometheus::registry`]. The host service serves
-//! `.gather()` from that registry in its `/metrics` handler — rustrade
-//! does not own an HTTP layer of its own.
+//! the `prometheus::registry` accessor in this crate's `prometheus`
+//! submodule. The host service serves `.gather()` from that registry in
+//! its `/metrics` handler — rustrade does not own an HTTP layer of its
+//! own.
 
 pub mod backoff;
 pub mod lifecycle;

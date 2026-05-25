@@ -106,7 +106,8 @@ impl SupervisorConfig {
 /// Atomic counters for supervisor-level metrics.
 ///
 /// When the `prometheus` feature is enabled, these are mirrored into the
-/// crate-local prometheus registry (see [`crate::prometheus`]).
+/// crate-local prometheus registry available via the `prometheus`
+/// submodule. Without the feature this is the only metrics surface.
 #[derive(Debug, Default)]
 pub struct SupervisorMetrics {
     /// Total service restarts (clean-exit + on-failure cycles).

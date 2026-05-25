@@ -10,11 +10,13 @@ use crate::slippage::SlippageModel;
 /// Configuration for a [`crate::Backtest`].
 #[derive(Debug, Clone)]
 pub struct BacktestConfig {
-    /// Symbol the brain trades. The engine only routes events with this
-    /// symbol to the brain; events for other symbols are silently
-    /// ignored (kept for future multi-symbol support).
-    pub symbol: Symbol,
-    /// Starting cash balance in quote currency.
+    /// Symbols the brain trades. For single-symbol backtests this is a
+    /// one-element vector; events whose symbol is not in the list are
+    /// silently ignored. The engine routes each `MarketDataEvent` to the
+    /// brain with the *current* position for that symbol.
+    pub symbols: Vec<Symbol>,
+    /// Starting cash balance in quote currency. Shared across all
+    /// symbols — there's a single equity curve.
     pub initial_cash: f64,
     /// Sizing config — how the brain's `Decision` becomes a contract
     /// count. Same struct used by the live `ExecutionService`.
@@ -24,9 +26,37 @@ pub struct BacktestConfig {
     /// Fee schedule applied to every fill.
     pub fees: FeeModel,
     /// Base-asset units per contract. For spot adapters this is `1.0`;
-    /// futures adapters override per symbol. Backtests are single-symbol
-    /// so it lives on the config rather than the (absent) exchange.
+    /// futures adapters override per symbol. Multi-symbol backtests
+    /// share a single multiplier — for mixed spot/futures portfolios
+    /// run each symbol in its own `Backtest` instance.
     pub contract_value: f64,
+    /// Per-period risk-free rate used by [`crate::BacktestResult::sharpe_ratio`]
+    /// and [`crate::BacktestResult::sortino_ratio`]. Expressed in the same
+    /// cadence as the candles — e.g. for daily candles with a 2 % annual
+    /// rate set this to `0.02 / 252 ≈ 7.94e-5`. Defaults to `0.0`.
+    pub risk_free_rate: f64,
+    /// Annualisation factor for the Sharpe and Sortino ratios. For daily
+    /// candles use `252` (trading days), for hourly `24 * 252`, for
+    /// minute `60 * 24 * 365`, etc. Defaults to `252`.
+    pub periods_per_year: u32,
+}
+
+impl BacktestConfig {
+    /// Convenience accessor for single-symbol configs.
+    ///
+    /// Returns the first (and only) symbol when [`Self::symbols`] is a
+    /// one-element vector. Panics on empty or multi-symbol configs —
+    /// callers that mix scopes should use [`Self::symbols`] directly.
+    pub fn symbol(&self) -> &Symbol {
+        assert_eq!(
+            self.symbols.len(),
+            1,
+            "BacktestConfig::symbol() is only valid for single-symbol backtests; \
+             this config has {} symbols. Use BacktestConfig::symbols instead.",
+            self.symbols.len()
+        );
+        &self.symbols[0]
+    }
 }
 
 impl BacktestConfig {
@@ -39,18 +69,33 @@ impl BacktestConfig {
 /// Builder for [`BacktestConfig`]. Validates on [`Self::build`].
 #[derive(Debug, Clone, Default)]
 pub struct BacktestConfigBuilder {
-    symbol: Option<Symbol>,
+    symbols: Vec<Symbol>,
     initial_cash: Option<f64>,
     sizing: Option<SizingConfig>,
     slippage: Option<SlippageModel>,
     fees: Option<FeeModel>,
     contract_value: Option<f64>,
+    risk_free_rate: Option<f64>,
+    periods_per_year: Option<u32>,
 }
 
 impl BacktestConfigBuilder {
-    /// Symbol to backtest. Required.
+    /// Single symbol to backtest. Convenience wrapper — equivalent to
+    /// calling [`Self::symbols`] with a one-element vector. Repeated
+    /// calls replace any previously set symbols.
     pub fn symbol(mut self, sym: impl Into<Symbol>) -> Self {
-        self.symbol = Some(sym.into());
+        self.symbols = vec![sym.into()];
+        self
+    }
+    /// Set the full symbol list. The brain will see events for all
+    /// listed symbols and is responsible for filtering. At least one
+    /// symbol is required.
+    pub fn symbols<I, S>(mut self, syms: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Symbol>,
+    {
+        self.symbols = syms.into_iter().map(Into::into).collect();
         self
     }
     /// Override the starting cash balance (default 10_000.0).
@@ -78,13 +123,27 @@ impl BacktestConfigBuilder {
         self.contract_value = Some(cv);
         self
     }
+    /// Per-period risk-free rate for Sharpe / Sortino (default `0.0`).
+    /// See [`BacktestConfig::risk_free_rate`] for the expected scaling.
+    pub fn risk_free_rate(mut self, r: f64) -> Self {
+        self.risk_free_rate = Some(r);
+        self
+    }
+    /// Annualisation factor for Sharpe / Sortino (default `252`).
+    /// See [`BacktestConfig::periods_per_year`] for the typical cadences.
+    pub fn periods_per_year(mut self, n: u32) -> Self {
+        self.periods_per_year = Some(n);
+        self
+    }
 
     /// Validate and build. Returns `Error::Config` on any constraint
     /// violation.
     pub fn build(self) -> Result<BacktestConfig> {
-        let symbol = self
-            .symbol
-            .ok_or_else(|| Error::Config("BacktestConfig.symbol is required".into()))?;
+        if self.symbols.is_empty() {
+            return Err(Error::Config(
+                "BacktestConfig requires at least one symbol".into(),
+            ));
+        }
         let initial_cash = self.initial_cash.unwrap_or(10_000.0);
         if !initial_cash.is_finite() || initial_cash <= 0.0 {
             return Err(Error::Config(
@@ -97,13 +156,27 @@ impl BacktestConfigBuilder {
                 "BacktestConfig.contract_value must be a finite positive number".into(),
             ));
         }
+        let risk_free_rate = self.risk_free_rate.unwrap_or(0.0);
+        if !risk_free_rate.is_finite() {
+            return Err(Error::Config(
+                "BacktestConfig.risk_free_rate must be finite".into(),
+            ));
+        }
+        let periods_per_year = self.periods_per_year.unwrap_or(252);
+        if periods_per_year == 0 {
+            return Err(Error::Config(
+                "BacktestConfig.periods_per_year must be > 0".into(),
+            ));
+        }
         Ok(BacktestConfig {
-            symbol,
+            symbols: self.symbols,
             initial_cash,
             sizing: self.sizing.unwrap_or_default(),
             slippage: self.slippage.unwrap_or_default(),
             fees: self.fees.unwrap_or_default(),
             contract_value,
+            risk_free_rate,
+            periods_per_year,
         })
     }
 }
@@ -139,10 +212,59 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_periods_per_year() {
+        let r = BacktestConfig::builder()
+            .symbol("X")
+            .periods_per_year(0)
+            .build();
+        assert!(matches!(r, Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn rejects_nan_risk_free_rate() {
+        let r = BacktestConfig::builder()
+            .symbol("X")
+            .risk_free_rate(f64::NAN)
+            .build();
+        assert!(matches!(r, Err(Error::Config(_))));
+    }
+
+    #[test]
     fn defaults_for_optional_fields() {
         let c = BacktestConfig::builder().symbol("X").build().unwrap();
         assert_eq!(c.initial_cash, 10_000.0);
         assert_eq!(c.contract_value, 1.0);
         assert_eq!(c.slippage, SlippageModel::Zero);
+        assert_eq!(c.risk_free_rate, 0.0);
+        assert_eq!(c.periods_per_year, 252);
+    }
+
+    #[test]
+    fn multi_symbol_config_round_trips() {
+        let c = BacktestConfig::builder()
+            .symbols(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+            .build()
+            .unwrap();
+        assert_eq!(c.symbols.len(), 3);
+        assert_eq!(c.symbols[0].as_str(), "BTCUSDT");
+        assert_eq!(c.symbols[2].as_str(), "SOLUSDT");
+    }
+
+    #[test]
+    fn symbol_accessor_panics_on_multi_symbol() {
+        let c = BacktestConfig::builder()
+            .symbols(["A", "B"])
+            .build()
+            .unwrap();
+        let r = std::panic::catch_unwind(|| {
+            let _ = c.symbol();
+        });
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn symbol_accessor_works_on_single_symbol() {
+        let c = BacktestConfig::builder().symbol("X").build().unwrap();
+        assert_eq!(c.symbol().as_str(), "X");
     }
 }

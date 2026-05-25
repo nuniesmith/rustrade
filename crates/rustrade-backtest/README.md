@@ -7,28 +7,30 @@ duplicate decision logic to keep in sync.
 
 ## What's in this crate
 
-| Type           | Purpose                                                          |
-| -------------- | ---------------------------------------------------------------- |
-| `Backtest`     | The replay loop — feeds candles to a `Brain` and accumulates fills |
-| `BacktestConfig` | Symbol, sizing config, slippage model, fee model, initial cash |
-| `SlippageModel` | `Zero`, `FixedBps`. Applied between the brain's signal and the simulated fill price |
-| `FeeModel`     | `Zero`, `Flat`, `MakerTaker`. Applied to every simulated fill   |
-| `BacktestResult` | Final stats: total return %, win rate, max drawdown, # trades |
+| Type             | Purpose                                                                                |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| `Backtest`       | The replay loop — feeds candles to a `Brain` and accumulates fills                     |
+| `BacktestConfig` | Symbols, sizing config, slippage / fee models, initial cash, Sharpe annualisation      |
+| `SlippageModel`  | `Zero`, `FixedBps`. Applied between the brain's signal and the simulated fill price    |
+| `FeeModel`       | `Zero`, `Flat`, `MakerTaker`. Applied to every simulated fill                          |
+| `load_csv` / `load_csv_str` | CSV → `Vec<Candle>` with a fixed `time,open,high,low,close,volume` layout   |
+| `sort_chronological` | Stable ascending-time sort for loaders that hand you newest-first              |
+| `BacktestResult` | Final stats: return %, win rate, max drawdown, equity curve, Sharpe, Sortino, # trades |
 
 ## Quickstart
 
 ```rust,ignore
 use std::sync::Arc;
-use rustrade_backtest::{Backtest, BacktestConfig, FeeModel, SlippageModel};
-use rustrade_core::{Candle, Symbol};
+use rustrade_backtest::{Backtest, BacktestConfig, FeeModel, SlippageModel, load_csv};
 
-let candles: Vec<Candle> = load_candles_somehow();
+let candles = load_csv("data/btcusdt-1m.csv")?;
 let result = Backtest::new(
     BacktestConfig::builder()
         .symbol("BTCUSDT")
         .initial_cash(10_000.0)
         .slippage(SlippageModel::FixedBps(5.0))
         .fees(FeeModel::Flat(0.001))
+        .periods_per_year(252 * 24 * 60) // per-minute Sharpe
         .build()?,
     Arc::new(MySmaCrossBrain::new()),
 )
@@ -37,20 +39,43 @@ let result = Backtest::new(
 .await?;
 
 println!("{}", result.summary());
+println!("sharpe : {:?}", result.sharpe_ratio());
+println!("sortino: {:?}", result.sortino_ratio());
+```
+
+### Multi-symbol replay
+
+For portfolio strategies, attach a candle series per symbol. The engine
+merges all series chronologically before replay and maintains
+independent `Position` state per symbol against a single shared cash
+balance.
+
+```rust,ignore
+let result = Backtest::new(
+    BacktestConfig::builder()
+        .symbols(["BTCUSDT", "ETHUSDT"])
+        .initial_cash(100_000.0)
+        .build()?,
+    Arc::new(MyPortfolioBrain::new()),
+)
+.with_symbol_candles("BTCUSDT", load_csv("data/btc.csv")?)
+.with_symbol_candles("ETHUSDT", load_csv("data/eth.csv")?)
+.run()
+.await?;
 ```
 
 ## Brain parity
 
 Any `impl rustrade_core::Brain` that runs through the live `rustrade::Bot`
-runs in this engine unchanged. See `tests/brain_parity.rs` for the
+runs in this engine unchanged. See `tests/sma_replay.rs` for the
 regression test that pins this down: the same brain emits the same
 sequence of decisions for the same candle series in both code paths.
 
 ## Status
 
-Phase 4a — minimum viable engine. CSV / Parquet candle loaders,
-book-walk slippage, tiered fees, and Sharpe / Sortino metrics land in
-Phase 4b. See the workspace [`TODO.md`](../../TODO.md).
+Phase 4b — adds CSV candle loader, Sharpe / Sortino, and multi-symbol
+replay. Parquet loaders and book-walk slippage remain deferred. See the
+workspace [`TODO.md`](../../TODO.md).
 
 ## Licence
 

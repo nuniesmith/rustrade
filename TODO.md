@@ -261,6 +261,25 @@ Examples are the framework's UX. They double as integration tests.
 - [x] Determinism: pinned down by two-run regression test
       `deterministic_replay_same_brain_same_series`.
 
+### Phase 4b (this batch)
+
+- [x] CSV candle loader (`load_csv` / `load_csv_str` /
+      `sort_chronological`). Fixed `time,open,high,low,close,volume`
+      column layout; supports `#` comments and rejects malformed rows
+      with `Error::Config`. Parquet and exchange-native dumps remain
+      out of scope; users can write against `Backtest::with_candles`.
+- [x] Sharpe / Sortino metrics on `BacktestResult`. Per-candle equity
+      sampling drives `equity_curve` and `period_returns`;
+      `BacktestConfig.risk_free_rate` + `periods_per_year` configure
+      annualisation. Returns `None` for fewer than two samples or zero
+      variance (Sharpe) / no downside (Sortino).
+- [x] Multi-symbol backtest. `BacktestConfig.symbols: Vec<Symbol>` with
+      a `symbol()` accessor for single-symbol convenience.
+      `Backtest::with_symbol_candles(symbol, candles)` for multi-symbol
+      runs; the engine merges all series chronologically before replay
+      and keeps independent `Position` state per symbol against a
+      shared cash balance.
+
 ### Phase 4b — deferred
 
 - [ ] **Zero-lookahead invariant** baked into the bus / event layer
@@ -268,15 +287,11 @@ Examples are the framework's UX. They double as integration tests.
       it by construction (candles fed in order; brain has no random
       access), but a stricter `BacktestBus` type would prevent future
       regressions.
-- [ ] CSV / Parquet candle loaders. Today candles are passed as a
-      `Vec<Candle>` — fine for tests, awkward for real research.
-- [ ] Sharpe / Sortino / expectancy / avg win-loss metrics. Need a
-      stable risk-free rate input and a deterministic equity sampling
-      cadence.
+- [ ] Parquet candle loader. CSV covers the common research case;
+      Parquet waits for the first user who actually needs it.
 - [ ] Book-walk slippage (needs an order-book replay, not just candles).
-- [ ] Multi-symbol backtest. Today the engine is single-symbol; brain
-      filtering on symbol is exercised in `examples/multi-brain-bot/`
-      but not yet in the backtest.
+- [ ] Expectancy / avg win-loss metrics. Derivable from the trade
+      ledger today; promote to first-class methods when a user asks.
 
 ## Phase 5 — Service-integration ergonomics
 

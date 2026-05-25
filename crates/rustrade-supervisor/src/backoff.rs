@@ -20,7 +20,7 @@
 
 use std::time::{Duration, Instant};
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Configuration for the exponential backoff strategy.
 ///
