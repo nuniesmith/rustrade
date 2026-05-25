@@ -91,6 +91,7 @@ impl PositionSizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn sizer(margin: f64, lev: u32, max: u32) -> PositionSizer {
         PositionSizer::new(SizingConfig {
@@ -133,5 +134,123 @@ mod tests {
         // notional = 1, per-contract = 1000 → floor(1/1000) = 0
         let s = sizer(1.0, 1, 50);
         assert_eq!(s.contracts(1_000_000.0, 0.001), 0);
+    }
+
+    // ── Property tests ─────────────────────────────────────────────────
+    //
+    // Bounds chosen to stay inside ranges that are realistic for crypto
+    // futures (prices up to ~1M, leverage up to 200x, margins up to ~1M)
+    // *and* to keep the unsaturated formula well inside `u32::MAX`.
+
+    proptest! {
+        /// Sizing must never exceed the configured cap.
+        #[test]
+        fn contracts_never_exceeds_cap(
+            margin in 0.0_f64..1_000_000.0,
+            leverage in 0_u32..200,
+            max in 0_u32..10_000,
+            price in 0.0_f64..1_000_000.0,
+            contract_value in 0.0_f64..100.0,
+        ) {
+            let s = sizer(margin, leverage, max);
+            prop_assert!(s.contracts(price, contract_value) <= max);
+        }
+
+        /// Any degenerate non-positive input forces a zero return.
+        #[test]
+        fn degenerate_inputs_return_zero(
+            margin in proptest::sample::select(vec![0.0, -1.0, -1_000.0]),
+            leverage in 0_u32..50,
+            price in 1.0_f64..100_000.0,
+            contract_value in 0.001_f64..1.0,
+        ) {
+            let s = sizer(margin, leverage, 1_000);
+            prop_assert_eq!(s.contracts(price, contract_value), 0);
+        }
+
+        #[test]
+        fn zero_or_negative_price_returns_zero(
+            price in proptest::sample::select(vec![0.0, -1.0, -50_000.0]),
+            margin in 1.0_f64..10_000.0,
+            leverage in 1_u32..50,
+            contract_value in 0.001_f64..1.0,
+        ) {
+            let s = sizer(margin, leverage, 1_000);
+            prop_assert_eq!(s.contracts(price, contract_value), 0);
+        }
+
+        #[test]
+        fn zero_or_negative_contract_value_returns_zero(
+            cv in proptest::sample::select(vec![0.0, -0.001, -1.0]),
+            margin in 1.0_f64..10_000.0,
+            leverage in 1_u32..50,
+            price in 1.0_f64..100_000.0,
+        ) {
+            let s = sizer(margin, leverage, 1_000);
+            prop_assert_eq!(s.contracts(price, cv), 0);
+        }
+
+        /// Doubling margin can only ever produce >= the original count
+        /// (subject to the cap). I.e. the sizer is monotone in margin.
+        #[test]
+        fn monotone_in_margin(
+            margin in 1.0_f64..10_000.0,
+            leverage in 1_u32..50,
+            price in 10.0_f64..50_000.0,
+            contract_value in 0.001_f64..1.0,
+        ) {
+            // High cap so the cap itself doesn't mask the property.
+            let s_low  = sizer(margin,        leverage, u32::MAX);
+            let s_high = sizer(margin * 2.0,  leverage, u32::MAX);
+            let c_low  = s_low.contracts(price, contract_value);
+            let c_high = s_high.contracts(price, contract_value);
+            prop_assert!(
+                c_high >= c_low,
+                "expected monotone in margin: low={c_low} high={c_high}"
+            );
+        }
+
+        /// Same property in leverage.
+        #[test]
+        fn monotone_in_leverage(
+            margin in 1.0_f64..10_000.0,
+            leverage in 1_u32..50,
+            price in 10.0_f64..50_000.0,
+            contract_value in 0.001_f64..1.0,
+        ) {
+            let s_low  = sizer(margin, leverage,     u32::MAX);
+            let s_high = sizer(margin, leverage * 2, u32::MAX);
+            let c_low  = s_low.contracts(price, contract_value);
+            let c_high = s_high.contracts(price, contract_value);
+            prop_assert!(
+                c_high >= c_low,
+                "expected monotone in leverage: low={c_low} high={c_high}"
+            );
+        }
+
+        /// The formula matches: contracts = floor(margin·leverage / (price·cv))
+        /// capped by max_contracts. Verify against an independently computed
+        /// reference for inputs that stay inside f64 → u32 safety.
+        #[test]
+        fn matches_reference_formula(
+            margin in 1.0_f64..100_000.0,
+            leverage in 1_u32..100,
+            max in 1_u32..1_000_000,
+            price in 1.0_f64..50_000.0,
+            contract_value in 0.001_f64..10.0,
+        ) {
+            let s = sizer(margin, leverage, max);
+            let got = s.contracts(price, contract_value);
+
+            let notional = margin * f64::from(leverage);
+            let per_contract = price * contract_value;
+            let raw = (notional / per_contract).floor();
+            let expected = if raw < 0.0 || !raw.is_finite() {
+                0
+            } else {
+                (raw as u32).min(max)
+            };
+            prop_assert_eq!(got, expected);
+        }
     }
 }

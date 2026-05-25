@@ -8,18 +8,17 @@
 //! kucoin bot in Apr 2026 — the sliding-window design replaces the older
 //! consecutive-loss pattern because losses spaced hours apart would reset
 //! the consecutive counter before ever tripping it.
+//!
+//! Time is read through the [`Clock`] trait so tests can advance the
+//! clock without sleeping.
 
 use std::collections::VecDeque;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before UNIX epoch")
-        .as_secs()
-}
+use crate::clock::{Clock, SystemClock};
 
 /// Configuration for [`CircuitBreaker`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,24 +66,33 @@ impl Default for CircuitBreakerConfig {
 pub struct CircuitBreaker {
     config: CircuitBreakerConfig,
     /// Timestamps of recent losses (Unix seconds). Wins are not stored —
-    /// see `record_win()` below.
+    /// see [`Self::record_win`] below.
     recent_losses: VecDeque<u64>,
     tripped_at_unix_secs: Option<u64>,
+    clock: Arc<dyn Clock>,
 }
 
 impl CircuitBreaker {
+    /// Create with the default system clock.
     pub fn new(config: CircuitBreakerConfig) -> Self {
+        Self::with_clock(config, Arc::new(SystemClock))
+    }
+
+    /// Create with an injected clock — typically `Arc<ManualClock>` from
+    /// [`crate::clock`] in tests.
+    pub fn with_clock(config: CircuitBreakerConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
             config,
             recent_losses: VecDeque::with_capacity(16),
             tripped_at_unix_secs: None,
+            clock,
         }
     }
 
     /// Call once per decision tick to auto-reset the breaker after cooldown
     /// and evict stale loss timestamps.
     pub fn tick(&mut self) {
-        let now = now_unix_secs();
+        let now = self.clock.now_unix_secs();
         if let Some(t) = self.tripped_at_unix_secs
             && now.saturating_sub(t) >= self.config.cooldown_secs
         {
@@ -96,7 +104,7 @@ impl CircuitBreaker {
     /// Record a losing trade. Trips the breaker if the rolling count
     /// within `window_secs` reaches `loss_limit`.
     pub fn record_loss(&mut self) {
-        let now = now_unix_secs();
+        let now = self.clock.now_unix_secs();
         self.recent_losses.push_back(now);
         self.evict_old(now);
 
@@ -116,13 +124,14 @@ impl CircuitBreaker {
     /// cooldown can un-trip the breaker. A single win is not evidence that
     /// market conditions have recovered.
     pub fn record_win(&mut self) {
-        self.evict_old(now_unix_secs());
+        self.evict_old(self.clock.now_unix_secs());
     }
 
     /// Is the breaker currently tripped and within its cooldown window?
     pub fn is_tripped(&self) -> bool {
-        self.tripped_at_unix_secs
-            .is_some_and(|t| now_unix_secs().saturating_sub(t) < self.config.cooldown_secs)
+        self.tripped_at_unix_secs.is_some_and(|t| {
+            self.clock.now_unix_secs().saturating_sub(t) < self.config.cooldown_secs
+        })
     }
 
     /// Manually clear the breaker. Typically not called in production — the
@@ -140,7 +149,7 @@ impl CircuitBreaker {
     /// Cooldown time remaining if tripped, else `None`.
     pub fn cooldown_remaining(&self) -> Option<Duration> {
         let t = self.tripped_at_unix_secs?;
-        let elapsed = now_unix_secs().saturating_sub(t);
+        let elapsed = self.clock.now_unix_secs().saturating_sub(t);
         (elapsed < self.config.cooldown_secs)
             .then(|| Duration::from_secs(self.config.cooldown_secs - elapsed))
     }
@@ -160,6 +169,7 @@ impl CircuitBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::ManualClock;
 
     fn cfg(loss_limit: u32, window: u64, cooldown: u64) -> CircuitBreakerConfig {
         CircuitBreakerConfig {
@@ -167,6 +177,17 @@ mod tests {
             window_secs: window,
             cooldown_secs: cooldown,
         }
+    }
+
+    fn breaker(
+        loss_limit: u32,
+        window: u64,
+        cooldown: u64,
+        start: u64,
+    ) -> (CircuitBreaker, Arc<ManualClock>) {
+        let clock = Arc::new(ManualClock::new(start));
+        let cb = CircuitBreaker::with_clock(cfg(loss_limit, window, cooldown), clock.clone());
+        (cb, clock)
     }
 
     #[test]
@@ -204,5 +225,71 @@ mod tests {
         cb.reset();
         assert!(!cb.is_tripped());
         assert_eq!(cb.recent_loss_count(), 0);
+    }
+
+    #[test]
+    fn old_losses_evicted_from_rolling_window() {
+        let (mut cb, clock) = breaker(
+            /*limit*/ 3, /*window*/ 3600, /*cooldown*/ 600, 1_000_000,
+        );
+
+        cb.record_loss(); // t=1_000_000
+        cb.record_loss(); // t=1_000_000
+        assert_eq!(cb.recent_loss_count(), 2);
+
+        // Advance past the window — those losses should be evicted on the
+        // next interaction with the breaker.
+        clock.advance_secs(3_700);
+        cb.record_loss(); // pushes a fresh loss; previous ones are >window
+        assert_eq!(
+            cb.recent_loss_count(),
+            1,
+            "losses outside the rolling window must be evicted"
+        );
+        assert!(!cb.is_tripped(), "rolling count of 1 should not trip");
+    }
+
+    #[test]
+    fn cooldown_auto_resets_on_tick() {
+        let (mut cb, clock) = breaker(
+            /*limit*/ 2, /*window*/ 3600, /*cooldown*/ 600, 1_000_000,
+        );
+
+        cb.record_loss();
+        cb.record_loss();
+        assert!(cb.is_tripped());
+        assert_eq!(
+            cb.cooldown_remaining(),
+            Some(Duration::from_secs(600)),
+            "cooldown should report full remaining at trip time"
+        );
+
+        // Halfway through cooldown — still tripped.
+        clock.advance_secs(300);
+        cb.tick();
+        assert!(cb.is_tripped());
+        assert_eq!(cb.cooldown_remaining(), Some(Duration::from_secs(300)));
+
+        // Past cooldown — tick should reset.
+        clock.advance_secs(301);
+        cb.tick();
+        assert!(!cb.is_tripped());
+        assert_eq!(cb.cooldown_remaining(), None);
+        assert_eq!(cb.recent_loss_count(), 0);
+    }
+
+    #[test]
+    fn losses_spaced_outside_window_never_trip() {
+        // The whole point of the sliding-window design over a consecutive
+        // counter: 3 losses spaced > window apart should not trip a
+        // limit-3 breaker.
+        let (mut cb, clock) = breaker(3, /*window*/ 3600, 600, 1_000_000);
+        cb.record_loss();
+        clock.advance_secs(3_700);
+        cb.record_loss();
+        clock.advance_secs(3_700);
+        cb.record_loss();
+        assert!(!cb.is_tripped());
+        assert_eq!(cb.recent_loss_count(), 1);
     }
 }

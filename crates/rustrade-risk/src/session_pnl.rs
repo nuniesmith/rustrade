@@ -5,16 +5,15 @@
 //! Strategy code records every trade close via [`SessionPnl::record_close`];
 //! the framework checks [`SessionPnl::is_session_halted`] before allowing
 //! new entries.
+//!
+//! Time is read through the [`Clock`] trait so tests can advance the
+//! clock and verify rollover without sleeping for a day.
+
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-fn utc_day_number() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() / 86_400)
-        .unwrap_or(0)
-}
+use crate::clock::{Clock, SystemClock};
 
 /// Configuration for [`SessionPnl`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,10 +64,23 @@ pub struct SessionPnl {
     /// UTC day number (days since epoch) of the last reset. Used to detect
     /// rollover; the `tick` method is the only place this is updated.
     last_reset_day: u64,
+    clock: Arc<dyn Clock>,
 }
 
 impl SessionPnl {
+    /// Create with the default system clock.
     pub fn new(symbol: impl Into<String>, config: SessionPnlConfig) -> Self {
+        Self::with_clock(symbol, config, Arc::new(SystemClock))
+    }
+
+    /// Create with an injected clock — typically `Arc<ManualClock>` from
+    /// [`crate::clock`] in tests.
+    pub fn with_clock(
+        symbol: impl Into<String>,
+        config: SessionPnlConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        let last_reset_day = clock.utc_day_number();
         Self {
             symbol: symbol.into(),
             realised: 0.0,
@@ -79,7 +91,8 @@ impl SessionPnl {
             breakevens: 0,
             config,
             halted: false,
-            last_reset_day: utc_day_number(),
+            last_reset_day,
+            clock,
         }
     }
 
@@ -151,7 +164,7 @@ impl SessionPnl {
     /// Call periodically (e.g. once per candle poll) to detect 00:00 UTC
     /// rollover and reset the session totals + halt flag.
     pub fn tick(&mut self) {
-        let today = utc_day_number();
+        let today = self.clock.utc_day_number();
         if today > self.last_reset_day {
             self.reset_session();
             self.last_reset_day = today;
@@ -181,6 +194,7 @@ impl SessionPnl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::ManualClock;
 
     fn cfg(limit: f64) -> SessionPnlConfig {
         SessionPnlConfig { loss_limit: limit }
@@ -221,5 +235,52 @@ mod tests {
         p.record_close(-5.0, 1.0); // loss
         p.record_close(1.0, 1.0); // breakeven
         assert!((p.win_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn utc_rollover_resets_session_via_tick() {
+        // Start at midnight UTC on day 100. Halt the session within the
+        // day, advance past midnight, then verify tick() rolls over.
+        let day = 100u64;
+        let clock = Arc::new(ManualClock::new(day * 86_400));
+        let mut p = SessionPnl::with_clock("TEST", cfg(-10.0), clock.clone());
+
+        // Take a halting loss intra-day.
+        clock.advance_secs(3_600); // +1 h, still day 100
+        p.record_close(-20.0, 0.0);
+        assert!(p.is_session_halted());
+        assert_eq!(p.trades, 1);
+
+        // Tick before midnight — no rollover yet.
+        clock.advance_secs(3_600); // +1 h more, still day 100
+        p.tick();
+        assert!(
+            p.is_session_halted(),
+            "should still be halted before midnight"
+        );
+
+        // Cross midnight into day 101 and tick — should reset cleanly.
+        clock.set((day + 1) * 86_400 + 5);
+        p.tick();
+        assert!(!p.is_session_halted(), "rollover must clear the halt");
+        assert_eq!(p.trades, 0);
+        assert!((p.net_pnl()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tick_within_same_day_is_a_noop() {
+        let clock = Arc::new(ManualClock::new(100 * 86_400 + 10));
+        let mut p = SessionPnl::with_clock("TEST", cfg(-1000.0), clock.clone());
+
+        p.record_close(5.0, 1.0); // net +4
+        let before = p.net_pnl();
+
+        clock.advance_secs(60 * 60 * 12); // +12 h, still day 100
+        p.tick();
+        assert!(
+            (p.net_pnl() - before).abs() < 1e-9,
+            "intra-day tick must not reset session totals"
+        );
+        assert_eq!(p.trades, 1);
     }
 }
