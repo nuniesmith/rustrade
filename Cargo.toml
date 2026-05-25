@@ -38,8 +38,8 @@ members = [
     "crates/rustrade-core",
     "crates/rustrade-supervisor",
     "crates/rustrade-risk",
+    "crates/rustrade",
     # "crates/rustrade-backtest",  # uncomment when Cargo.toml added
-    # "crates/rustrade",           # uncomment when Cargo.toml added
     # "examples/noop-bot",         # uncomment when Cargo.toml added
 ]
 resolver = "3"
@@ -84,6 +84,7 @@ rand = "0.9"
 proptest = "1"
 
 # Internal
+rustrade            = { path = "crates/rustrade",            version = "0.1.0" }
 rustrade-core       = { path = "crates/rustrade-core",       version = "0.1.0" }
 rustrade-supervisor = { path = "crates/rustrade-supervisor", version = "0.1.0" }
 rustrade-risk       = { path = "crates/rustrade-risk",       version = "0.1.0" }

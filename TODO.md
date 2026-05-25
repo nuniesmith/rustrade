@@ -139,39 +139,60 @@ crates. Breaking them post-0.1 hurts every dependent. Audit and lock now.
 ## Phase 2 — Build the `rustrade` facade (~1–2 weeks)
 
 The crate downstream services actually depend on. Lives in
-`crates/rustrade/`. Create the Cargo.toml and uncomment in the workspace
-manifest as the first step.
+`crates/rustrade/`. Split into three reviewable tracks like Phase 1.
 
-- [ ] Create `crates/rustrade/Cargo.toml` and add to workspace members.
-- [ ] `lib.rs` re-exports `core`, `risk`, and selected `supervisor` items.
-      Downstream should `use rustrade::*` and never need to depend on the
-      sub-crates directly.
-- [ ] `bot::BotConfig` builder: name, symbols, poll cadence, sim/live mode,
-      shutdown timeout, close-positions-on-shutdown flag.
-- [ ] `bot::Bot::new(config, exchange, brains) -> Self`.
-- [ ] `Bot::run_until_shutdown(self) -> anyhow::Result<()>`.
-- [ ] `Bot::handle() -> BotHandle` returning a cheap, cloneable handle a
-      downstream service can hold to query health / trigger shutdown
-      without retaining the bot itself. This is the **key embedding API**.
-- [ ] Framework-side services (each `impl TradingService`):
-  - [ ] `MarketFeedService` — drives a `MarketSource`, publishes to bus.
-  - [ ] `CandlePollerService` — periodic poll of an adapter, publishes.
-  - [ ] `FillRoutingService` — consumes a `FillSource`, calls `brain.on_fill`,
-        updates `SessionPnl`.
-  - [ ] `ExecutionService` — subscribes to `MarketDataBus`, calls
-        `brain.on_event`, runs `Decision` through risk gates, places orders.
-  - [ ] `HealthService` — aggregates per-service phases and `brain.health()`
-        into a `BotHealth` struct, exposed via `BotHandle`.
-- [ ] Risk gating order in `ExecutionService`: `SessionPnl::is_session_halted`
-      → `CircuitBreaker::is_tripped` → `PositionSizer::contracts` → place.
-      Each gate emits a structured `tracing` event on block.
-- [ ] `Bot::on_shutdown` hook: optional close-positions-on-stop, final
-      `brain.health()` snapshot to logs.
-- [ ] `logging::init_tracing()` helper — opinionated default subscriber for
-      downstream services that don't already have one. Skippable.
-- [ ] `metrics::MetricsSink` trait so downstream services can plug in their
-      own metrics backend instead of being forced onto prometheus. The
+### Phase 2a — minimum viable facade
+
+- [x] Create `crates/rustrade/Cargo.toml` and add to workspace members.
+- [x] `lib.rs` re-exports `core`, `risk`, and selected `supervisor`
+      items. Downstream `use rustrade::*` covers the public surface.
+- [x] `bot::BotConfig` + `BotConfigBuilder`. Phase 2a fields: name,
+      symbols, shutdown_timeout, install_signal_handler,
+      market_bus_capacity, close_positions_on_shutdown (reserved; not
+      yet honoured). Poll cadence / sim mode wait for 2b.
+- [x] `bot::Bot::new(config, exchange, brains) -> Result<Self>`.
+- [x] `Bot::run_until_shutdown(self) -> anyhow::Result<()>` — spawns
+      services, drives the supervisor, drains on exit.
+- [x] `Bot::handle() -> BotHandle` — cheap cloneable handle with
+      `shutdown()`, `await_shutdown()`, `is_shutting_down()`, `health()`.
+- [x] `BotHealth` aggregate combining per-service `ServiceLifecycleSnapshot`s
+      and per-`Brain` health into one snapshot.
+- [x] `ExecutionService` (Phase 2a scope only): subscribes to
+      `MarketDataBus`, calls `brain.on_event` for each event. Records
+      `events_processed` / `events_dropped` via atomics. **Risk gating
+      and order placement land in Phase 2b.**
+- [x] `logging::init_tracing()` opinionated default subscriber.
+- [x] Integration tests in `crates/rustrade/tests/bot_lifecycle.rs`
+      against the public API only.
+
+### Phase 2b — real framework services
+
+- [ ] `MarketFeedService` — drives a `MarketSource`, publishes to bus.
+- [ ] `CandlePollerService` — periodic poll of an adapter (cadence
+      configurable per symbol), publishes candles to the bus.
+- [ ] `FillRoutingService` — consumes a `FillSource`, calls
+      `brain.on_fill`, updates `SessionPnl` per symbol.
+- [ ] Expand `ExecutionService`: wire `Decision` through the risk
+      gates in this order — `SessionPnl::is_session_halted` →
+      `CircuitBreaker::is_tripped` → `PositionSizer::contracts` →
+      `ExchangeClient::place_order`. Each gate emits a structured
+      `tracing` event on block.
+- [ ] Position-cache so `brain.on_event` sees the actual position for
+      its symbol instead of `Position::FLAT`.
+- [ ] Wire `Bot::config().close_positions_on_shutdown` to a real
+      close-on-stop hook that uses `ExchangeClient::close_position` for
+      each non-flat position.
+
+### Phase 2c — observability ergonomics
+
+- [ ] `metrics::MetricsSink` trait so host services plug in their own
+      metrics backend instead of being forced onto Prometheus. The
       `prometheus` feature provides a built-in impl.
+- [ ] `BotHandle::subscribe_signals() -> broadcast::Receiver<Signal>`
+      for host services that want to stream signals out.
+- [ ] Externally-owned `CancellationToken` support in `BotConfigBuilder`
+      so the host's shutdown sequence ties directly into the bot
+      without spawning a linker task.
 
 ## Phase 3 — Examples & end-to-end validation (~1 week)
 
