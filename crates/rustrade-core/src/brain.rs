@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::market::MarketDataEvent;
+use crate::market::{MarketDataEvent, Symbol};
 use crate::signal::SignalType;
 use crate::types::{Fill, Position, Price, Volume};
 
@@ -204,7 +204,7 @@ pub trait Brain: Send + Sync + 'static {
     /// Informational only.
     ///
     /// Default implementation is a no-op.
-    async fn on_position_change(&self, _symbol: &str, _position: &Position) -> Result<()> {
+    async fn on_position_change(&self, _symbol: &Symbol, _position: &Position) -> Result<()> {
         Ok(())
     }
 
@@ -214,5 +214,74 @@ pub trait Brain: Send + Sync + 'static {
     /// indicator warm-up state, model staleness, memory pressure, etc.
     async fn health(&self) -> BrainHealth {
         BrainHealth::ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Price;
+
+    #[test]
+    fn decision_hold() {
+        let d = Decision::hold();
+        assert!(matches!(d.signal, SignalType::Hold));
+        assert_eq!(d.confidence, 0.0);
+        assert!(d.stop_price.is_none());
+        assert!(d.take_profit_price.is_none());
+        assert!(matches!(d.size_hint, SizeHint::Default));
+    }
+
+    #[test]
+    fn decision_buy_sell_close() {
+        let b = Decision::buy(0.75);
+        assert!(matches!(b.signal, SignalType::Buy));
+        assert_eq!(b.confidence, 0.75);
+
+        let s = Decision::sell(0.5);
+        assert!(matches!(s.signal, SignalType::Sell));
+
+        let c = Decision::close();
+        assert!(matches!(c.signal, SignalType::Close));
+        assert_eq!(c.confidence, 1.0);
+    }
+
+    #[test]
+    fn decision_builders_compose() {
+        let d = Decision::buy(0.9)
+            .with_stop(Price(95.0))
+            .with_take_profit(Price(110.0))
+            .with_size_hint(SizeHint::MarginFraction(0.25))
+            .with_metadata(serde_json::json!({"reason": "ema-cross"}));
+
+        assert_eq!(d.stop_price, Some(Price(95.0)));
+        assert_eq!(d.take_profit_price, Some(Price(110.0)));
+        assert!(matches!(d.size_hint, SizeHint::MarginFraction(f) if (f - 0.25).abs() < 1e-9));
+        assert_eq!(d.metadata["reason"], "ema-cross");
+    }
+
+    #[test]
+    fn decision_serde_roundtrip() {
+        let d = Decision::sell(0.6).with_stop(Price(120.0));
+        let json = serde_json::to_string(&d).unwrap();
+        let back: Decision = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.signal, SignalType::Sell));
+        assert_eq!(back.confidence, 0.6);
+        assert_eq!(back.stop_price, Some(Price(120.0)));
+    }
+
+    #[test]
+    fn brain_health_ok_is_healthy() {
+        let h = BrainHealth::ok();
+        assert!(h.healthy);
+        assert_eq!(h.events_processed, 0);
+        assert_eq!(h.non_hold_decisions, 0);
+    }
+
+    #[test]
+    fn brain_health_unhealthy_captures_reason() {
+        let h = BrainHealth::unhealthy("warm-up incomplete");
+        assert!(!h.healthy);
+        assert_eq!(h.details["reason"], "warm-up incomplete");
     }
 }

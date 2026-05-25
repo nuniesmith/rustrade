@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::market::Side;
+use crate::market::{Side, Symbol};
 
 // ── Scalar wrappers ──────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ impl fmt::Display for Volume {
 /// A single trade tick or best-bid/best-ask snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tick {
-    pub symbol: String,
+    pub symbol: Symbol,
     pub timestamp: DateTime<Utc>,
     pub bid: Price,
     pub ask: Price,
@@ -115,6 +115,74 @@ pub enum OrderKind {
     Fok,
 }
 
+/// What kind of stop attachment an [`Order`] carries.
+///
+/// Opaque to the framework — the adapter is responsible for translating
+/// these into native exchange semantics (e.g. KuCoin futures stops vs
+/// Binance OCO orders vs Bybit conditional orders). Adapters that don't
+/// support a given variant should reject the order with a clear error
+/// rather than silently ignoring the attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StopKind {
+    /// Trigger a market order at `trigger_price`.
+    StopMarket,
+    /// Trigger a limit order at `trigger_price`, posted at `limit_price`.
+    StopLimit { limit_price: Price },
+    /// Take-profit market order at `trigger_price`.
+    TakeProfit,
+    /// Trailing stop with the given trail distance in quote currency.
+    TrailingStop { trail_distance: Price },
+}
+
+/// Stop-order attachment on an [`Order`].
+///
+/// See [`StopKind`] for variants. Use
+/// [`ExchangeClient::supports`](crate::ExchangeClient::supports) with
+/// [`Capability::StopOrders`](crate::Capability::StopOrders) to check
+/// adapter capability before constructing one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StopAttachment {
+    /// Price at which the exchange triggers the stop.
+    pub trigger_price: Price,
+    /// What kind of stop to fire on trigger.
+    pub kind: StopKind,
+}
+
+impl StopAttachment {
+    /// Convenience: stop-market at `trigger_price`.
+    pub fn stop_market(trigger_price: Price) -> Self {
+        Self {
+            trigger_price,
+            kind: StopKind::StopMarket,
+        }
+    }
+
+    /// Convenience: stop-limit triggered at `trigger_price`, posted at `limit_price`.
+    pub fn stop_limit(trigger_price: Price, limit_price: Price) -> Self {
+        Self {
+            trigger_price,
+            kind: StopKind::StopLimit { limit_price },
+        }
+    }
+
+    /// Convenience: take-profit market order at `trigger_price`.
+    pub fn take_profit(trigger_price: Price) -> Self {
+        Self {
+            trigger_price,
+            kind: StopKind::TakeProfit,
+        }
+    }
+
+    /// Convenience: trailing stop with the given trail distance.
+    pub fn trailing(trigger_price: Price, trail_distance: Price) -> Self {
+        Self {
+            trigger_price,
+            kind: StopKind::TrailingStop { trail_distance },
+        }
+    }
+}
+
 /// A request to enter, exit, or reduce a position.
 ///
 /// This is the framework-level abstraction; concrete exchange adapters translate
@@ -122,7 +190,7 @@ pub enum OrderKind {
 /// recommended — it lets the framework reconcile fills back to this order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
-    pub symbol: String,
+    pub symbol: Symbol,
     pub side: Side,
     pub kind: OrderKind,
     pub size: Volume,
@@ -133,10 +201,15 @@ pub struct Order {
     /// Optional client-supplied id. Exchanges that support it will echo it back
     /// on fills, making reconciliation trivial.
     pub client_id: Option<String>,
+    /// Optional stop-order attachment. Adapters that don't advertise
+    /// [`Capability::StopOrders`](crate::Capability::StopOrders) must
+    /// reject orders carrying this field.
+    #[serde(default)]
+    pub stop: Option<StopAttachment>,
 }
 
 impl Order {
-    pub fn market(symbol: impl Into<String>, side: Side, size: Volume) -> Self {
+    pub fn market(symbol: impl Into<Symbol>, side: Side, size: Volume) -> Self {
         Self {
             symbol: symbol.into(),
             side,
@@ -145,10 +218,11 @@ impl Order {
             limit_price: None,
             reduce_only: false,
             client_id: None,
+            stop: None,
         }
     }
 
-    pub fn limit(symbol: impl Into<String>, side: Side, size: Volume, price: Price) -> Self {
+    pub fn limit(symbol: impl Into<Symbol>, side: Side, size: Volume, price: Price) -> Self {
         Self {
             symbol: symbol.into(),
             side,
@@ -157,6 +231,7 @@ impl Order {
             limit_price: Some(price),
             reduce_only: false,
             client_id: None,
+            stop: None,
         }
     }
 
@@ -169,12 +244,19 @@ impl Order {
         self.client_id = Some(id.into());
         self
     }
+
+    /// Attach a stop. Adapter must advertise
+    /// [`Capability::StopOrders`](crate::Capability::StopOrders).
+    pub fn with_stop(mut self, stop: StopAttachment) -> Self {
+        self.stop = Some(stop);
+        self
+    }
 }
 
 /// A trade fill reported by the exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fill {
-    pub symbol: String,
+    pub symbol: Symbol,
     pub order_id: String,
     pub client_id: Option<String>,
     pub side: Side,
@@ -228,5 +310,156 @@ impl Position {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn tick(bid: f64, ask: f64) -> Tick {
+        Tick {
+            symbol: Symbol::new("BTCUSDT"),
+            timestamp: Utc.timestamp_opt(0, 0).unwrap(),
+            bid: Price(bid),
+            ask: Price(ask),
+            bid_size: Volume(1.0),
+            ask_size: Volume(1.0),
+            last_price: None,
+            last_size: None,
+        }
+    }
+
+    #[test]
+    fn tick_mid_price_and_spread() {
+        let t = tick(100.0, 102.0);
+        assert!((t.mid_price().value() - 101.0).abs() < 1e-9);
+        assert!((t.spread().value() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tick_mid_handles_zero_spread() {
+        let t = tick(100.0, 100.0);
+        assert_eq!(t.mid_price().value(), 100.0);
+        assert_eq!(t.spread().value(), 0.0);
+    }
+
+    #[test]
+    fn position_close_side_long() {
+        let p = Position {
+            qty: 5.0,
+            ..Position::FLAT
+        };
+        assert!(p.is_long());
+        assert!(!p.is_short());
+        assert!(!p.is_flat());
+        assert_eq!(p.close_side(), Some(Side::Sell));
+    }
+
+    #[test]
+    fn position_close_side_short() {
+        let p = Position {
+            qty: -5.0,
+            ..Position::FLAT
+        };
+        assert!(p.is_short());
+        assert!(!p.is_long());
+        assert_eq!(p.close_side(), Some(Side::Buy));
+    }
+
+    #[test]
+    fn position_close_side_flat() {
+        assert_eq!(Position::FLAT.close_side(), None);
+        assert!(Position::FLAT.is_flat());
+    }
+
+    #[test]
+    fn order_market_builder() {
+        let o = Order::market("BTCUSDT", Side::Buy, Volume(1.0));
+        assert_eq!(o.symbol, Symbol::new("BTCUSDT"));
+        assert_eq!(o.side, Side::Buy);
+        assert_eq!(o.kind, OrderKind::Market);
+        assert!(o.limit_price.is_none());
+        assert!(!o.reduce_only);
+        assert!(o.client_id.is_none());
+        assert!(o.stop.is_none());
+    }
+
+    #[test]
+    fn order_limit_builder() {
+        let o = Order::limit("BTCUSDT", Side::Sell, Volume(2.0), Price(50_000.0));
+        assert_eq!(o.kind, OrderKind::Limit);
+        assert_eq!(o.limit_price, Some(Price(50_000.0)));
+    }
+
+    #[test]
+    fn order_with_reduce_only() {
+        let o = Order::market("X", Side::Buy, Volume(1.0)).with_reduce_only(true);
+        assert!(o.reduce_only);
+    }
+
+    #[test]
+    fn order_with_client_id() {
+        let o = Order::market("X", Side::Buy, Volume(1.0)).with_client_id("abc-123");
+        assert_eq!(o.client_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn order_with_stop_market() {
+        let o = Order::market("X", Side::Sell, Volume(1.0))
+            .with_reduce_only(true)
+            .with_stop(StopAttachment::stop_market(Price(95.0)));
+        assert!(o.reduce_only);
+        let stop = o.stop.unwrap();
+        assert_eq!(stop.trigger_price, Price(95.0));
+        assert!(matches!(stop.kind, StopKind::StopMarket));
+    }
+
+    #[test]
+    fn order_with_stop_limit() {
+        let s = StopAttachment::stop_limit(Price(95.0), Price(94.5));
+        assert_eq!(s.trigger_price, Price(95.0));
+        match s.kind {
+            StopKind::StopLimit { limit_price } => assert_eq!(limit_price, Price(94.5)),
+            other => panic!("unexpected stop kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_attachment_take_profit() {
+        let s = StopAttachment::take_profit(Price(110.0));
+        assert!(matches!(s.kind, StopKind::TakeProfit));
+    }
+
+    #[test]
+    fn stop_attachment_trailing() {
+        let s = StopAttachment::trailing(Price(100.0), Price(2.5));
+        match s.kind {
+            StopKind::TrailingStop { trail_distance } => {
+                assert_eq!(trail_distance, Price(2.5));
+            }
+            other => panic!("unexpected stop kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_serde_roundtrip_without_stop() {
+        let o = Order::market("BTCUSDT", Side::Buy, Volume(1.5));
+        let json = serde_json::to_string(&o).unwrap();
+        let back: Order = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.symbol, o.symbol);
+        assert_eq!(back.side, o.side);
+        assert_eq!(back.size, o.size);
+        assert!(back.stop.is_none());
+    }
+
+    #[test]
+    fn order_serde_roundtrip_with_stop() {
+        let o = Order::market("X", Side::Sell, Volume(1.0))
+            .with_stop(StopAttachment::trailing(Price(100.0), Price(2.5)));
+        let json = serde_json::to_string(&o).unwrap();
+        let back: Order = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.stop, o.stop);
     }
 }

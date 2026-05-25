@@ -48,3 +48,34 @@ pub struct Signal {
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_type_display() {
+        assert_eq!(SignalType::Buy.to_string(), "BUY");
+        assert_eq!(SignalType::Sell.to_string(), "SELL");
+        assert_eq!(SignalType::Hold.to_string(), "HOLD");
+        assert_eq!(SignalType::Close.to_string(), "CLOSE");
+    }
+
+    #[test]
+    fn signal_serde_roundtrip() {
+        let s = Signal {
+            id: "sig-1".into(),
+            symbol: "BTCUSDT".into(),
+            kind: SignalType::Buy,
+            confidence: 0.8,
+            timestamp: chrono::Utc::now(),
+            source: "ema-cross".into(),
+            metadata: serde_json::json!({"fast": 9, "slow": 21}),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Signal = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, s.id);
+        assert!(matches!(back.kind, SignalType::Buy));
+        assert_eq!(back.metadata["fast"], 9);
+    }
+}
