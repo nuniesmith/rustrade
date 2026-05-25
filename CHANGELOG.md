@@ -10,6 +10,29 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Facade crate, minimum viable (Phase 2a).** New
+  [`rustrade`](./crates/rustrade) crate, the entry point downstream
+  services depend on:
+  - `Bot` + `BotConfig` + `BotConfigBuilder` — embedded runtime that
+    owns a `Supervisor`, an `ExchangeClient`, one or more `Brain`s, and
+    the in-process `MarketDataBus`.
+  - `BotHandle` — cheap cloneable handle exposing `shutdown()`,
+    `await_shutdown()`, `is_shutting_down()`, and `health()`. Host
+    services hold one to drive the bot without retaining the `Bot`
+    itself.
+  - `BotHealth` + `BrainHealthSnapshot` — aggregate snapshot returned
+    by `handle.health()`.
+  - `ExecutionService` (Phase 2a scope) — subscribes to the
+    `MarketDataBus`, calls `brain.on_event(...)` for each event,
+    tracks events processed + dropped via atomics. Risk gating and
+    order placement land in Phase 2b.
+  - `logging::init_tracing()` — opinionated default subscriber. Skippable;
+    silently no-ops when the host already has one installed.
+  - Re-exports from `rustrade-core`, `rustrade-supervisor`, and
+    `rustrade-risk` so downstream services depend on `rustrade` alone.
+  - 6 unit tests + 3 integration tests in `crates/rustrade/tests/`
+    against the public API only — same surface a downstream service
+    sees.
 - **Risk crate polish (Phase 1, track 3).** `rustrade-risk` picks up:
   - New `clock` module: `Clock` trait, `SystemClock` (default impl),
     `ManualClock` for tests. `Arc<C: Clock>` delegates so a single

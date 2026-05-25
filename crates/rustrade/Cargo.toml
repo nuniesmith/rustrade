@@ -1,0 +1,36 @@
+[package]
+name         = "rustrade"
+description  = "Open-source trading bot framework — the crate downstream services depend on"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+readme     = "README.md"
+keywords   = ["trading", "crypto", "bot", "framework"]
+categories = ["asynchronous", "api-bindings"]
+
+[features]
+# Forward `prometheus` to the supervisor crate so feature-gated metrics
+# stay consistent across the workspace.
+default    = []
+prometheus = ["rustrade-supervisor/prometheus"]
+
+[dependencies]
+rustrade-core       = { workspace = true }
+rustrade-supervisor = { workspace = true }
+rustrade-risk       = { workspace = true }
+
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+tokio-util  = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+serde_json  = { workspace = true }
+
+[dev-dependencies]
+tokio  = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
+chrono = { workspace = true }
