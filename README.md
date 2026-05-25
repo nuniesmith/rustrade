@@ -182,6 +182,19 @@ See `NEXT_STEPS.md` for the proposed build order. The short version:
 
 - **First-time users:** [`docs/quickstart.md`](./docs/quickstart.md) —
   build a working bot in 50 lines.
+- **Writing strategies:** [`docs/writing-a-brain.md`](./docs/writing-a-brain.md)
+  — the `Brain` trait, state, position handling, the canonical
+  `Mutex<State>` pattern.
+- **Writing exchange adapters:**
+  [`docs/writing-an-exchange-adapter.md`](./docs/writing-an-exchange-adapter.md)
+  — `ExchangeClient`, `MarketSource`, `FillSource`, the `Capability`
+  enum.
+- **Embedding into a host service:**
+  [`docs/embedding.md`](./docs/embedding.md) — `BotHandle`, external
+  cancellation, signal subscription, runtime + resource expectations.
+- **Backtesting:** [`docs/backtesting.md`](./docs/backtesting.md) —
+  deterministic replay, slippage / fee models, the brain-identical
+  guarantee.
 - **Reference embeddings:**
   [`examples/noop-bot`](./examples/noop-bot),
   [`examples/sma-cross-bot`](./examples/sma-cross-bot),

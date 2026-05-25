@@ -312,21 +312,39 @@ Examples are the framework's UX. They double as integration tests.
 - [x] Workspace-locked `0.1.x` version policy documented in
       `CONTRIBUTING.md`, plus the planned publish ordering.
 
-### Phase 6b — extended tutorials + CI release plumbing
+### Phase 6b — extended tutorials + CI (this batch)
 
-- [ ] Additional tutorials in `docs/`:
-  - [ ] "Writing a Brain" — `Brain` trait, state, position handling,
-        the canonical `Mutex<State>` pattern.
-  - [ ] "Writing an exchange adapter" — `ExchangeClient`, `MarketSource`,
-        `FillSource`, the `Capability` introspection enum.
-  - [ ] "Embedding rustrade in your service" — `BotHandle`, external
-        cancellation, signal subscription.
-  - [ ] "Backtesting" — end-to-end walk through `rustrade-backtest`
-        including slippage/fee tuning.
+- [x] Additional tutorials in `docs/`:
+  - [x] `writing-a-brain.md` — `Brain` trait, state, position
+        handling, the canonical `Mutex<State>` pattern, a worked
+        SMA crossover.
+  - [x] `writing-an-exchange-adapter.md` — `ExchangeClient`,
+        `MarketSource`, `FillSource`, `Capability` introspection,
+        `contract_value`, the cancellation contract.
+  - [x] `embedding.md` — `BotHandle`, external cancellation, signal
+        subscription, runtime + resource expectations.
+  - [x] `backtesting.md` — brain-identical guarantee, position state
+        machine, determinism, intentional non-features.
+- [x] `.github/workflows/ci.yml`: `fmt`, `clippy` (with and without
+      features), `test` matrix (Ubuntu + macOS), `doc` with
+      `-D warnings`, `cargo-deny`.
+- [x] `.github/dependabot.yml`: weekly Cargo + GitHub Actions
+      updates, grouped by `tokio*` / `tracing*`.
+- [x] `deny.toml`: licence allow-list, advisory blocking,
+      registry/git source pinning.
+
+### Phase 6c — deferred
+
 - [ ] `# Example` rustdoc block on every trait and major struct.
-- [ ] CI release plumbing: `cargo publish` driver + `cargo-semver-checks`
-      to catch accidental breaks before publish.
+      (Mechanical — lower priority than narrative tutorials.)
+- [ ] `cargo publish` driver + `cargo-semver-checks` in CI. Wait
+      until the first crates.io release to design the workflow against
+      a real target.
 - [ ] Consider migrating to mdbook if the docs grow past ~6 files.
+- [ ] cargo-audit weekly scheduled job (subsumed by `cargo-deny`'s
+      advisory check for now; revisit if we need a separate report
+      pipeline).
+- [ ] Coverage with `cargo-llvm-cov` surfaced in PR comments.
 
 ## Cross-cutting
 
