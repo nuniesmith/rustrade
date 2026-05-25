@@ -1,0 +1,46 @@
+# cargo-deny configuration.
+#
+# Run locally with `cargo install cargo-deny && cargo deny check`. CI
+# runs `EmbarkStudios/cargo-deny-action@v2` on every PR (see
+# `.github/workflows/ci.yml`).
+
+[graph]
+all-features = true
+
+[licenses]
+# Standard permissive licences plus the few exotic ones that appear in
+# our transitive tree. Everything else fails the check and a human
+# decides.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Crates whose duplicates we tolerate — typically because the ecosystem
+# can't get to one version in our MSRV window. Empty for now; populate as
+# real duplicates show up rather than pre-emptively.
+skip = []
+
+[advisories]
+# Fail CI on any active security advisory. Yanked dependencies warn but
+# don't block.
+yanked = "warn"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

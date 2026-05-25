@@ -10,6 +10,35 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **CI + extended tutorials (Phase 6b).**
+  - GitHub Actions workflow `.github/workflows/ci.yml`: `fmt`, `clippy`
+    (with and without `--all-features`), `test` matrix on
+    `ubuntu-latest` + `macos-latest`, `doc` with `-D warnings`, and
+    `cargo-deny` for licences + advisories + duplicate-dep policy.
+    Every PR and push to `main` runs the full gauntlet.
+  - `.github/dependabot.yml`: weekly Cargo + GitHub Actions updates,
+    grouped by `tokio*` / `tracing*` to reduce PR noise.
+  - `deny.toml`: licence allow-list, advisory blocking, registry/git
+    source pinning. Catches new transitive deps with surprising
+    licences before they land.
+  - Four new tutorials in `docs/`:
+    - `writing-a-brain.md` — the `Brain` trait, the canonical
+      `Mutex<State>` pattern, a worked SMA crossover, what the
+      framework does next.
+    - `writing-an-exchange-adapter.md` — `ExchangeClient`,
+      `MarketSource`, `FillSource`, `Capability` introspection,
+      `contract_value`, the cancellation contract, leverage and
+      symbol typing.
+    - `embedding.md` — `BotHandle` API surface, external cancellation,
+      signal subscription, runtime + resource expectations,
+      feeding the risk gates.
+    - `backtesting.md` — the brain-identical guarantee, the position
+      state machine for closes and flips, determinism, what the
+      engine intentionally doesn't do.
+  - README.md "Getting started" section expanded with links to each
+    tutorial.
+
+### Added
 - **Documentation + release polish (Phase 6a).**
   - `#![warn(missing_docs)]` on every published crate. Every public
     item now carries at least a one-line rustdoc, surfaced through
