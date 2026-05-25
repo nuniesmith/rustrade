@@ -38,6 +38,7 @@ pub mod bus;
 pub mod error;
 pub mod exchange;
 pub mod market;
+pub mod metrics;
 pub mod signal;
 pub mod types;
 
@@ -45,9 +46,10 @@ pub use brain::{Brain, BrainHealth, Decision, SizeHint};
 pub use bus::{MarketDataBus, SignalBus};
 pub use error::{Error, Result};
 pub use exchange::{
-    Capability, EventSource, ExchangeClient, FillSource, MarketSource, OrderStatus,
+    CandleSource, Capability, EventSource, ExchangeClient, FillSource, MarketSource, OrderStatus,
 };
 pub use market::{Exchange, MarketDataEvent, Side, Symbol};
+pub use metrics::{MetricsSink, NoopSink};
 pub use signal::{Signal, SignalType};
 pub use types::{
     Candle, Fill, Order, OrderKind, Position, Price, StopAttachment, StopKind, Tick, Volume,

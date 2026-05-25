@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustrade_core::{
-    Brain, Error, ExchangeClient, FillSource, MarketDataBus, MarketSource, Position, Result,
-    SignalBus, Symbol,
+    Brain, CandleSource, Error, ExchangeClient, FillSource, MarketDataBus, MarketSource,
+    MetricsSink, NoopSink, Position, Result, SignalBus, Symbol,
 };
 use rustrade_risk::{CircuitBreakerConfig, SessionPnlConfig, SizingConfig};
 use rustrade_supervisor::{Supervisor, SupervisorConfig};
@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::execution::{ExecutionContext, ExecutionService};
 use crate::handle::BotHandle;
 use crate::risk_state::{PositionCache, RiskStateMap, build_position_cache, build_risk_state};
-use crate::services::{FillRoutingService, MarketFeedService};
+use crate::services::{CandlePollerService, FillRoutingService, MarketFeedService};
 
 const DEFAULT_MARKET_BUS_CAPACITY: usize = 1024;
 const DEFAULT_SIGNAL_BUS_CAPACITY: usize = 256;
@@ -251,10 +251,21 @@ pub struct Bot {
     signal_bus: SignalBus,
     positions: PositionCache,
     risk: RiskStateMap,
+    metrics: Arc<dyn MetricsSink>,
     handle: BotHandle,
     external_cancel: Option<CancellationToken>,
     market_source: Option<Arc<dyn MarketSource>>,
     fill_source: Option<Arc<dyn FillSource>>,
+    candle_pollers: Vec<CandlePollerSpec>,
+}
+
+/// One registered `(symbol, interval, cadence)` for `Bot::with_candle_poller`.
+struct CandlePollerSpec {
+    source: Arc<dyn CandleSource>,
+    symbol: Symbol,
+    interval: Duration,
+    poll_cadence: Duration,
+    limit: usize,
 }
 
 impl Bot {
@@ -313,11 +324,43 @@ impl Bot {
             signal_bus,
             positions,
             risk,
+            metrics: Arc::new(NoopSink),
             handle,
             external_cancel: None,
             market_source: None,
             fill_source: None,
+            candle_pollers: Vec::new(),
         })
+    }
+
+    /// Install a [`MetricsSink`]. The framework's services emit
+    /// counters and histograms to this sink on every observable event;
+    /// the default is [`NoopSink`], which discards everything.
+    pub fn with_metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
+        self.metrics = sink;
+        self
+    }
+
+    /// Register a [`CandleSource`] to be polled every `poll_cadence` for
+    /// `(symbol, interval)`. Polled candles are deduplicated by
+    /// timestamp and published to the bot's [`MarketDataBus`]. Repeated
+    /// calls accumulate — one supervised service per registered tuple.
+    pub fn with_candle_poller(
+        mut self,
+        source: Arc<dyn CandleSource>,
+        symbol: impl Into<Symbol>,
+        interval: Duration,
+        poll_cadence: Duration,
+        limit: usize,
+    ) -> Self {
+        self.candle_pollers.push(CandlePollerSpec {
+            source,
+            symbol: symbol.into(),
+            interval,
+            poll_cadence,
+            limit,
+        });
+        self
     }
 
     /// Tie this bot's shutdown to an externally-owned cancellation token.
@@ -455,6 +498,21 @@ impl Bot {
                     self.brains.clone(),
                     self.exchange.clone(),
                     self.positions.clone(),
+                    self.risk.clone(),
+                    self.metrics.clone(),
+                )));
+        }
+
+        for spec in &self.candle_pollers {
+            self.supervisor
+                .spawn_service(Box::new(CandlePollerService::new(
+                    spec.source.clone(),
+                    spec.symbol.clone(),
+                    spec.interval,
+                    spec.poll_cadence,
+                    spec.limit,
+                    self.market_bus.clone(),
+                    self.metrics.clone(),
                 )));
         }
 

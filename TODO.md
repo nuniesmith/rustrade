@@ -202,19 +202,24 @@ The crate downstream services actually depend on. Lives in
       `Bot::with_external_cancel(token)` — internal linker task,
       no host-side glue required.
 
-### Phase 2d — deferred
+### Phase 2d
 
-- [ ] `CandlePollerService` — needs either a new `CandleSource` trait
-      or an extension to `ExchangeClient`. Defer until a real adapter
-      needs it.
-- [ ] `metrics::MetricsSink` trait so host services plug in their own
-      metrics backend instead of being forced onto Prometheus. Defer
-      until the prometheus integration in `rustrade-supervisor` reveals
-      the right event shape.
-- [ ] Auto-feed realised PnL into the risk state from
-      `FillRoutingService`. Requires entry-price-aware accounting
-      (FIFO/LIFO, partial closes, fee handling) — punted to keep
-      Phase 2c reviewable.
+- [x] `MetricsSink` trait + `NoopSink` default in `rustrade-core`;
+      `Bot::with_metrics(Arc<dyn MetricsSink>)` plugs in a host-owned
+      backend. Framework services emit
+      `rustrade_fills_routed_total`, `rustrade_candles_published_total`,
+      `rustrade_realised_pnl_quote`, etc.
+- [x] `CandleSource` trait in `rustrade-core` — separate from
+      `MarketSource` because polling has a different shape than
+      streaming.
+- [x] `CandlePollerService` wired via `Bot::with_candle_poller(source,
+      symbol, interval, poll_cadence, limit)`. Per-symbol cadences via
+      repeated calls. Deduplicates by `Candle::time`.
+- [x] Auto-feed realised PnL into the risk state from
+      `FillRoutingService` using weighted-average entry accounting
+      (same model the backtest engine uses). Reducing fills emit
+      `record_close` + win/loss on the breaker; flip fills emit PnL
+      for the closed portion only.
 
 ## Phase 3 — Examples & end-to-end validation
 

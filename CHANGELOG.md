@@ -10,6 +10,35 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Framework observability + candle polling + auto-PnL (Phase 2d).**
+  - `MetricsSink` trait in `rustrade-core` with default `NoopSink`.
+    `Bot::with_metrics(Arc<dyn MetricsSink>)` plugs in a host-owned
+    backend (Prometheus, StatsD, OpenTelemetry, etc.). The framework's
+    services emit `rustrade_fills_routed_total`,
+    `rustrade_candles_published_total`,
+    `rustrade_realised_pnl_quote`, and friends on every observable
+    event.
+  - `CandleSource` trait in `rustrade-core`. Separate from
+    `MarketSource` because polling has a fundamentally different shape
+    (pull, paced) than streaming events.
+  - `CandlePollerService` + `Bot::with_candle_poller(source, symbol,
+    interval, poll_cadence, limit)`. Per-symbol cadences via repeated
+    calls. Deduplicates by `Candle::time` so overlapping responses
+    don't republish.
+  - `FillRoutingService` now auto-feeds realised PnL into the
+    per-symbol risk state using a weighted-average entry model (the
+    same model the backtest engine uses). Reducing fills emit
+    `record_close` + a `record_win` / `record_loss` on the breaker;
+    same-direction fills are no-ops; flip fills emit PnL for the
+    closed portion only. Hosts that want a different accounting model
+    can still use the manual `BotHandle::record_trade_outcome`, but
+    cannot also wire a `FillRoutingService` (they'd double-count).
+  - 4 new integration tests in `crates/rustrade/tests/phase_2d.rs`:
+    candle poller dedup, metrics sink receives fill counters,
+    auto-PnL feeds the circuit breaker, NoopSink default doesn't
+    panic.
+
+### Added
 - **CI + extended tutorials (Phase 6b).**
   - GitHub Actions workflow `.github/workflows/ci.yml`: `fmt`, `clippy`
     (with and without `--all-features`), `test` matrix on
