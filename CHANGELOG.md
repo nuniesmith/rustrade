@@ -10,6 +10,26 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Backtest engine, minimum viable (Phase 4a).** New
+  [`rustrade-backtest`](./crates/rustrade-backtest) crate. The same
+  `Brain` trait used by `rustrade` for live trading drives the
+  backtest — no special "backtest-mode" code paths in the strategy.
+  - `Backtest` / `BacktestConfig` / `BacktestConfigBuilder` — single-
+    threaded synchronous replay loop fed by a `Vec<Candle>`.
+  - `SlippageModel`: `Zero`, `FixedBps` (book-walk waits for Phase 4b).
+  - `FeeModel`: `Zero`, `Flat`, `MakerTaker` (Phase 4a treats every
+    order as taker).
+  - `BacktestResult` aggregates `TradeOutcome`s into total return, win
+    rate, profit factor, max drawdown, and per-trade ledger.
+  - Determinism guarantee: same `(Brain, candles, config)` → same
+    `BacktestResult` every run. Pinned down by
+    `tests/sma_replay.rs::deterministic_replay_same_brain_same_series`.
+  - Brain-identical guarantee: `tests/sma_replay.rs` runs an
+    SMA-crossover `Brain` through the engine end-to-end — same trait
+    impl that `examples/sma-cross-bot` uses for the live path.
+  - 15 unit tests + 3 integration tests covering hold/buy/close paths,
+    determinism, slippage-reduces-PnL invariant, and the SMA-crossover
+    replay.
 - **Examples + end-to-end validation (Phase 3).** Four reference
   embeddings in `examples/`, each a workspace member with its own
   `Cargo.toml` so downstream services can clone the shape verbatim:

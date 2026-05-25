@@ -38,12 +38,12 @@ members = [
     "crates/rustrade-core",
     "crates/rustrade-supervisor",
     "crates/rustrade-risk",
+    "crates/rustrade-backtest",
     "crates/rustrade",
     "examples/noop-bot",
     "examples/sma-cross-bot",
     "examples/multi-brain-bot",
     "examples/embed-in-service",
-    # "crates/rustrade-backtest",  # uncomment when Cargo.toml added
 ]
 resolver = "3"
 
@@ -88,9 +88,10 @@ proptest = "1"
 
 # Internal
 rustrade            = { path = "crates/rustrade",            version = "0.1.0" }
+rustrade-backtest   = { path = "crates/rustrade-backtest",   version = "0.1.0" }
 rustrade-core       = { path = "crates/rustrade-core",       version = "0.1.0" }
-rustrade-supervisor = { path = "crates/rustrade-supervisor", version = "0.1.0" }
 rustrade-risk       = { path = "crates/rustrade-risk",       version = "0.1.0" }
+rustrade-supervisor = { path = "crates/rustrade-supervisor", version = "0.1.0" }
 
 # ============================================================================
 # Profiles

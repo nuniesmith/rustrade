@@ -238,25 +238,40 @@ Examples are the framework's UX. They double as integration tests.
       a scripted mock exchange and assert on the sequence of orders /
       signals / lifecycle events.
 
-## Phase 4 — Backtest engine (~1–2 weeks)
+## Phase 4 — Backtest engine
 
-Lower priority than 1–3 — defer until the live path is stable, since the
-backtest engine consumes the same `Brain` trait and benefits from a
-locked-down core.
+### Phase 4a — minimum viable engine (this batch)
 
-- [ ] Create `crates/rustrade-backtest/Cargo.toml`, add to workspace.
-- [ ] **Zero-lookahead invariant.** Engine must guarantee that a `Brain`
-      cannot observe data with a timestamp `>` the current event's. Bake
-      this in at the bus layer, not just by convention.
-- [ ] Replay engine: CSV / Parquet candle source, deterministic order
-      ordering, monotonic clock.
-- [ ] Pluggable slippage models: zero, fixed-bps, book-walk (last optional).
-- [ ] Pluggable fee schedules: flat, tiered, maker/taker.
-- [ ] Performance metrics: total return, Sharpe, Sortino, max drawdown,
-      profit factor, win rate, avg win/loss, expectancy.
-- [ ] Brain-identical guarantee: any `impl Brain` that runs live runs in
-      a backtest unchanged. Document this and add a regression test that
-      runs the same brain through both paths against a tiny scripted feed.
+- [x] Create `crates/rustrade-backtest/Cargo.toml`, add to workspace.
+- [x] Single-threaded synchronous replay engine: feeds candles to a
+      `Brain` in order, applies slippage + fees, tracks position +
+      realised PnL, emits `TradeOutcome`s for every reducing fill.
+- [x] Pluggable slippage models: `Zero`, `FixedBps`.
+- [x] Pluggable fee schedules: `Zero`, `Flat`, `MakerTaker`.
+- [x] Performance metrics in `BacktestResult`: total return, win rate,
+      profit factor, max drawdown, per-trade ledger.
+- [x] Brain-identical guarantee: `tests/sma_replay.rs` runs the same
+      `impl Brain` shape as `examples/sma-cross-bot/` through the
+      engine. The trait is the contract; no engine-specific brain code.
+- [x] Determinism: pinned down by two-run regression test
+      `deterministic_replay_same_brain_same_series`.
+
+### Phase 4b — deferred
+
+- [ ] **Zero-lookahead invariant** baked into the bus / event layer
+      rather than enforced by convention. Today the engine guarantees
+      it by construction (candles fed in order; brain has no random
+      access), but a stricter `BacktestBus` type would prevent future
+      regressions.
+- [ ] CSV / Parquet candle loaders. Today candles are passed as a
+      `Vec<Candle>` — fine for tests, awkward for real research.
+- [ ] Sharpe / Sortino / expectancy / avg win-loss metrics. Need a
+      stable risk-free rate input and a deterministic equity sampling
+      cadence.
+- [ ] Book-walk slippage (needs an order-book replay, not just candles).
+- [ ] Multi-symbol backtest. Today the engine is single-symbol; brain
+      filtering on symbol is exercised in `examples/multi-brain-bot/`
+      but not yet in the backtest.
 
 ## Phase 5 — Service-integration ergonomics (~1 week)
 
