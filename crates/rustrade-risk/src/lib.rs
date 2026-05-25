@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! # rustrade-risk
 //!
 //! Generic risk primitives for trading bots:

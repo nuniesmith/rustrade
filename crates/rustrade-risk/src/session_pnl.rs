@@ -52,12 +52,19 @@ impl Default for SessionPnlConfig {
 /// ```
 #[derive(Debug, Clone)]
 pub struct SessionPnl {
+    /// Symbol this PnL tracker is for (used in log records).
     pub symbol: String,
+    /// Cumulative gross realised PnL, in quote currency.
     pub realised: f64,
+    /// Cumulative fees paid this session, in quote currency.
     pub fees: f64,
+    /// Total trades recorded this session.
     pub trades: u32,
+    /// Wins (net PnL > 0).
     pub wins: u32,
+    /// Losses (net PnL < 0).
     pub losses: u32,
+    /// Break-evens (net PnL == 0).
     pub breakevens: u32,
     config: SessionPnlConfig,
     halted: bool,

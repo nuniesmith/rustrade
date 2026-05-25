@@ -299,25 +299,34 @@ Examples are the framework's UX. They double as integration tests.
       buffer sizes, expected shutdown time, restart-after-crash latency
       bounds.
 
-## Phase 6 — Documentation & release (~ongoing)
+## Phase 6 — Documentation & release
 
-- [ ] `#![warn(missing_docs)]` on every public crate.
-- [ ] Rustdoc on every public item, with at least one `# Example` block on
-      each trait and major struct.
-- [ ] Top-level `docs/` mdbook (or rustdoc landing page) with:
-  - [ ] "Your first trading bot in 50 lines"
-  - [ ] "Writing a Brain" (covers `Brain` trait, state, position handling)
-  - [ ] "Writing an exchange adapter" (covers `ExchangeClient`,
-        `MarketSource`, `FillSource`)
-  - [ ] "Embedding rustrade in your service" (covers `BotHandle`, external
-        cancellation, signal subscription)
-  - [ ] "Backtesting" (once Phase 4 lands)
-- [ ] Decide version policy: workspace-locked `0.1.x` for all crates
-      (simple, recommended) vs per-crate independent versions (flexible
-      but painful). Document in CONTRIBUTING.
-- [ ] Publish workflow: `cargo publish` order is core → supervisor → risk →
-      backtest → rustrade. Automate with `cargo-release` or a small script.
-- [ ] Pre-publish: `cargo-semver-checks` in CI to catch accidental breaks.
+### Phase 6a — docs + version policy (this batch)
+
+- [x] `#![warn(missing_docs)]` on every public crate. Every public item
+      carries at least a one-line rustdoc. `cargo doc` is clean across
+      `--workspace --no-deps --all-features`.
+- [x] Top-level `docs/quickstart.md` — "Your first rustrade bot in 50
+      lines". Walks through `Brain`, `ExchangeClient`, and `Bot`
+      end-to-end, matching `examples/noop-bot/` line-for-line.
+- [x] Workspace-locked `0.1.x` version policy documented in
+      `CONTRIBUTING.md`, plus the planned publish ordering.
+
+### Phase 6b — extended tutorials + CI release plumbing
+
+- [ ] Additional tutorials in `docs/`:
+  - [ ] "Writing a Brain" — `Brain` trait, state, position handling,
+        the canonical `Mutex<State>` pattern.
+  - [ ] "Writing an exchange adapter" — `ExchangeClient`, `MarketSource`,
+        `FillSource`, the `Capability` introspection enum.
+  - [ ] "Embedding rustrade in your service" — `BotHandle`, external
+        cancellation, signal subscription.
+  - [ ] "Backtesting" — end-to-end walk through `rustrade-backtest`
+        including slippage/fee tuning.
+- [ ] `# Example` rustdoc block on every trait and major struct.
+- [ ] CI release plumbing: `cargo publish` driver + `cargo-semver-checks`
+      to catch accidental breaks before publish.
+- [ ] Consider migrating to mdbook if the docs grow past ~6 files.
 
 ## Cross-cutting
 

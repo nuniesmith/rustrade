@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! # rustrade-backtest
 //!
 //! Deterministic backtest engine for [`rustrade_core::Brain`]s. The same

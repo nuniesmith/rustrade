@@ -3,6 +3,7 @@
 /// Result alias used throughout `rustrade-backtest`.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Backtest-engine error type.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Configuration was missing a required field or had an invalid value.

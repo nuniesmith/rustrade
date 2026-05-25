@@ -35,14 +35,20 @@ impl std::fmt::Display for SignalType {
 /// a brain can record its rationale for post-hoc analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signal {
+    /// Unique identifier for this signal (typically `{brain_name}-{counter}`).
     pub id: String,
+    /// Symbol the signal is for, as a free-form string.
     pub symbol: String,
+    /// Buy / Sell / Hold / Close.
     pub kind: SignalType,
     /// Confidence in [0.0, 1.0]. A brain producing a `Buy` with confidence
     /// 0.2 is saying "I'm barely sure about this" — the risk layer can choose
     /// to size down or reject.
     pub confidence: f64,
+    /// Time the brain emitted this signal.
     pub timestamp: DateTime<Utc>,
+    /// Brain name that emitted the signal — useful for routing in
+    /// multi-brain bots.
     pub source: String,
     /// Free-form. Use `serde_json::json!({...})` to populate.
     #[serde(default)]

@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! # rustrade-supervisor
 //!
 //! Structured service lifecycle management for async trading bots.

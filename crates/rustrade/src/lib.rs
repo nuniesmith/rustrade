@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! # rustrade
 //!
 //! Open-source trading bot framework — the facade crate downstream

@@ -38,6 +38,7 @@ pub struct MarketFeedService {
 }
 
 impl MarketFeedService {
+    /// Wrap a [`MarketSource`] into a [`TradingService`].
     pub fn new(source: Arc<dyn MarketSource>) -> Self {
         let name = format!("market-feed[{}]", source.name());
         Self { name, source }
@@ -110,10 +111,12 @@ impl FillRoutingService {
         }
     }
 
+    /// Total fills delivered to brains since service start.
     pub fn fills_routed(&self) -> u64 {
         self.fills_routed.load(Ordering::Relaxed)
     }
 
+    /// Total `exchange.get_position` failures during cache refresh.
     pub fn refresh_errors(&self) -> u64 {
         self.refresh_errors.load(Ordering::Relaxed)
     }

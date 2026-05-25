@@ -178,6 +178,22 @@ See `NEXT_STEPS.md` for the proposed build order. The short version:
 
 ---
 
+## Getting started
+
+- **First-time users:** [`docs/quickstart.md`](./docs/quickstart.md) —
+  build a working bot in 50 lines.
+- **Reference embeddings:**
+  [`examples/noop-bot`](./examples/noop-bot),
+  [`examples/sma-cross-bot`](./examples/sma-cross-bot),
+  [`examples/multi-brain-bot`](./examples/multi-brain-bot),
+  [`examples/embed-in-service`](./examples/embed-in-service).
+- **API docs:** `cargo doc --workspace --no-deps --open`.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) — toolchain, the five
+required commands, branch + commit conventions, versioning policy.
+
 ## License
 
 MIT.

@@ -134,7 +134,9 @@ impl fmt::Display for TerminationReason {
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("invalid lifecycle transition: {from} → {to}")]
 pub struct TransitionError {
+    /// Phase the service was in.
     pub from: ServicePhase,
+    /// Phase the caller tried to move to.
     pub to: ServicePhase,
 }
 
@@ -181,10 +183,12 @@ impl ServiceLifecycle {
 
     // ── Accessors ─────────────────────────────────────────────────────
 
+    /// Current lifecycle phase.
     pub fn phase(&self) -> ServicePhase {
         self.phase
     }
 
+    /// Service name as configured on construction.
     pub fn service_name(&self) -> &str {
         &self.service_name
     }
@@ -209,6 +213,7 @@ impl ServiceLifecycle {
         self.total_failures
     }
 
+    /// The last error message recorded on a failed transition, if any.
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
@@ -231,6 +236,7 @@ impl ServiceLifecycle {
 
     // ── Transitions ───────────────────────────────────────────────────
 
+    /// Move from `Starting` to `Running`.
     pub fn transition_to_running(&mut self) -> Result<(), TransitionError> {
         self.validate_transition(ServicePhase::Running)?;
         self.set_phase(ServicePhase::Running);
@@ -243,6 +249,7 @@ impl ServiceLifecycle {
         Ok(())
     }
 
+    /// Move from `Running` (or `Starting`) to `BackingOff` after a failure.
     pub fn transition_to_backing_off(
         &mut self,
         error: &str,
@@ -276,6 +283,7 @@ impl ServiceLifecycle {
         Ok(())
     }
 
+    /// Move to `Stopping` on cancellation — services drain after this.
     pub fn transition_to_stopping(&mut self) -> Result<(), TransitionError> {
         self.validate_transition(ServicePhase::Stopping)?;
         self.accumulate_running_time();
@@ -375,14 +383,23 @@ impl fmt::Display for ServiceLifecycle {
 /// serialization (e.g., for a `/health` JSON endpoint).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceLifecycleSnapshot {
+    /// Service name.
     pub service_name: String,
+    /// Lifecycle phase at snapshot time.
     pub phase: ServicePhase,
+    /// Total start attempts to date.
     pub start_count: u32,
+    /// Total failures to date.
     pub total_failures: u32,
+    /// Last recorded error message, if any.
     pub last_error: Option<String>,
+    /// Cumulative wall-clock time in `Running`.
     pub cumulative_running_secs: f64,
+    /// How long since the service was first created.
     pub age_secs: f64,
+    /// How long since entering the current phase.
     pub time_in_phase_secs: f64,
+    /// Termination reason as a human string, if `phase == Terminated`.
     pub termination_reason: Option<String>,
 }
 

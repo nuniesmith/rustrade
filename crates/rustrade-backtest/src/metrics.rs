@@ -16,13 +16,21 @@ use serde::{Deserialize, Serialize};
 /// position is closed with `Side::Sell`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TradeOutcome {
+    /// Symbol the trade was on.
     pub symbol: String,
+    /// Side of the *closing* fill (`Sell` to close a long, etc.).
     pub close_side: Side,
+    /// Closed quantity.
     pub qty: f64,
+    /// Average entry price of the closed quantity.
     pub entry_price: f64,
+    /// Fill price of the close.
     pub exit_price: f64,
+    /// Gross PnL on the closed quantity, in quote currency, before fees.
     pub gross_pnl: f64,
+    /// Fee charged to this close, in quote currency.
     pub fee: f64,
+    /// When the close fill occurred.
     pub closed_at: DateTime<Utc>,
 }
 
@@ -48,7 +56,10 @@ impl TradeOutcome {
 /// Trade classification on net PnL — used by metric aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
+    /// Net PnL > 0.
     Win,
+    /// Net PnL < 0.
     Loss,
+    /// Net PnL == 0.
     Breakeven,
 }

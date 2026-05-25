@@ -39,13 +39,21 @@ pub struct BotHealth {
 /// Per-brain health information surfaced in [`BotHealth::brains`].
 #[derive(Debug, Clone)]
 pub struct BrainHealthSnapshot {
+    /// Brain name (see `Brain::name`).
     pub name: String,
+    /// Whether the brain reports itself healthy.
     pub healthy: bool,
+    /// Total events processed since startup.
     pub events_processed: u64,
+    /// Number of non-`Hold` decisions emitted.
     pub non_hold_decisions: u64,
+    /// Free-form details reported by the brain.
     pub details: serde_json::Value,
 }
 
+/// Cheap cloneable handle into a running [`Bot`](crate::Bot).
+///
+/// See [the module docs](self) for the host-side contract.
 #[derive(Clone)]
 pub struct BotHandle {
     cancel: CancellationToken,

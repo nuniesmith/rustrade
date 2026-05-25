@@ -48,6 +48,7 @@ pub struct PositionSizer {
 }
 
 impl PositionSizer {
+    /// Construct a sizer with the given [`SizingConfig`].
     pub fn new(config: SizingConfig) -> Self {
         Self { config }
     }
@@ -83,6 +84,7 @@ impl PositionSizer {
         raw.min(self.config.max_contracts)
     }
 
+    /// Borrow the sizer's underlying config.
     pub fn config(&self) -> &SizingConfig {
         &self.config
     }
