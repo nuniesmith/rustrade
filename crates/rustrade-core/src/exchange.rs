@@ -5,11 +5,13 @@
 //! `exchange-apiws` already provides most of this — these traits are the
 //! framework-side view.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::market::{MarketDataEvent, Symbol};
-use crate::types::{Fill, Order, Position};
+use crate::types::{Candle, Fill, Order, Position};
 
 /// Optional adapter capabilities, queried via [`ExchangeClient::supports`].
 ///
@@ -169,4 +171,24 @@ pub trait FillSource: Send + Sync + 'static {
 pub trait EventSource: Send + Sync + 'static {
     /// Await the next event. Returns `None` when the stream ends.
     async fn next_event(&self) -> Option<MarketDataEvent>;
+}
+
+/// Periodic candle source — separate from [`MarketSource`] because
+/// candle polling has a fundamentally different shape (pull, paced)
+/// than streaming events (push, unbounded).
+///
+/// Spot-only adapters don't need to implement this; the framework will
+/// only spawn a candle poller when one is wired via
+/// `Bot::with_candle_poller`. Futures adapters with native candle
+/// endpoints (KuCoin, Binance, Bybit, …) implement it directly.
+#[async_trait]
+pub trait CandleSource: Send + Sync + 'static {
+    /// Short identifier for logging — typically the exchange name.
+    fn name(&self) -> &str;
+
+    /// Fetch up to `limit` of the most recent completed candles for
+    /// `symbol` at the given interval. Implementors return them in
+    /// chronological order (oldest first). If the exchange's native
+    /// endpoint returns newest-first, sort before returning.
+    async fn poll(&self, symbol: &Symbol, interval: Duration, limit: usize) -> Result<Vec<Candle>>;
 }
