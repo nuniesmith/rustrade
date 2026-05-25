@@ -10,6 +10,27 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Service-integration ergonomics (Phase 5).**
+  - `BotConfig.signal_bus_capacity` (default 256) now separate from
+    `market_bus_capacity` (default 1024). Signal-bus consumers can be
+    sized independently of the market-data bus.
+  - Crate-level rustdoc gains "Tokio runtime requirements" and
+    "Resource expectations" sections covering multi-thread runtime
+    requirement, memory-per-symbol estimate, channel drop-oldest
+    semantics, expected shutdown time, and restart-after-crash latency
+    bounds. `Bot::run_until_shutdown` gets the same coverage in its
+    method docs.
+  - Stricter config validation in `BotConfigBuilder::build`:
+    - Empty symbol list → `Error::Config`
+    - Zero `shutdown_timeout` → `Error::Config`
+    - NaN `session_pnl.loss_limit` → `Error::Config`
+    - Non-finite or negative `sizing.margin_per_trade` → `Error::Config`
+    - Zero `signal_bus_capacity` → `Error::Config` (already existed for
+      `market_bus_capacity`)
+  - Six new builder validation tests; the rustrade-crate unit-test
+    count is now 13 (was 7).
+
+### Added
 - **Backtest engine, minimum viable (Phase 4a).** New
   [`rustrade-backtest`](./crates/rustrade-backtest) crate. The same
   `Brain` trait used by `rustrade` for live trading drives the

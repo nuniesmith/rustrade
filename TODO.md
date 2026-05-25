@@ -273,27 +273,31 @@ Examples are the framework's UX. They double as integration tests.
       filtering on symbol is exercised in `examples/multi-brain-bot/`
       but not yet in the backtest.
 
-## Phase 5 — Service-integration ergonomics (~1 week)
+## Phase 5 — Service-integration ergonomics
 
-This is what "framework I can use with other service-level apps" actually
-demands once the basics work.
-
-- [ ] `BotHandle` API surface:
-  - [ ] `health() -> BotHealth`
-  - [ ] `shutdown()` — fire-and-forget cancellation trigger
-  - [ ] `await_shutdown()` — future that resolves when bot has drained
-  - [ ] `subscribe_signals() -> broadcast::Receiver<Signal>` — host
-        service can stream brain output for logging / dashboards
-- [ ] Accept an externally-owned `CancellationToken` in `Bot::new` so the
-      host service can tie bot lifetime to its own shutdown sequence.
-- [ ] Document the tokio runtime contract (uses `tokio::spawn`; assumes
-      multi-thread runtime; how to embed inside an existing runtime).
-- [ ] `BotConfig` validation: reject empty symbol list, zero poll cadence,
-      conflicting flags. Return `Error::Config`, never panic.
-- [ ] Bounded channel capacities everywhere — make them config knobs.
-      Document the drop-oldest semantics of `broadcast`.
-- [ ] Resource SLAs: document expected memory per active symbol, expected
-      shutdown time, expected restart-after-crash latency.
+- [x] `BotHandle` API surface — landed across Phase 2a–2c:
+  - [x] `health() -> BotHealth`
+  - [x] `shutdown()` — fire-and-forget cancellation trigger
+  - [x] `await_shutdown()` — resolves when shutdown is triggered (note:
+        not when fully drained — host awaits the bot's `JoinHandle` for
+        that)
+  - [x] `subscribe_signals() -> broadcast::Receiver<Signal>`
+  - [x] `record_trade_outcome` to feed risk gates from host fill flow
+- [x] Externally-owned `CancellationToken` via
+      `Bot::with_external_cancel(token)` — internal linker, no host
+      glue required.
+- [x] Tokio runtime contract documented in `lib.rs` and
+      `Bot::run_until_shutdown` docs.
+- [x] Tightened `BotConfig` validation: empty symbol list, zero
+      shutdown timeout, NaN loss limit, non-finite margin, zero
+      market/signal bus capacities — all return `Error::Config`. The
+      framework never panics on bad config.
+- [x] Channel capacities configurable: `market_bus_capacity` (default
+      1024) and `signal_bus_capacity` (default 256). Drop-oldest
+      semantics documented on both buses and on `subscribe_signals`.
+- [x] Resource SLAs documented: memory per active symbol, channel
+      buffer sizes, expected shutdown time, restart-after-crash latency
+      bounds.
 
 ## Phase 6 — Documentation & release (~ongoing)
 
