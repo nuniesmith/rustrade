@@ -69,6 +69,37 @@ pub enum OrderStatus {
 /// `async_trait` is used so `Arc<dyn ExchangeClient>` works — downstream
 /// code can swap concrete exchanges at runtime without generics propagating
 /// through the whole system.
+///
+/// # Example
+///
+/// A stub adapter useful for examples and tests. Real adapters connect
+/// to a network and report actual state.
+///
+/// ```
+/// use async_trait::async_trait;
+/// use rustrade_core::{Capability, ExchangeClient, Order, Position, Result, Symbol};
+///
+/// struct StubExchange;
+///
+/// #[async_trait]
+/// impl ExchangeClient for StubExchange {
+///     fn name(&self) -> &str { "stub" }
+///     async fn place_order(&self, _order: &Order) -> Result<String> {
+///         Ok("order-1".into())
+///     }
+///     async fn cancel_all(&self, _symbol: &Symbol) -> Result<usize> { Ok(0) }
+///     async fn close_position(&self, _symbol: &Symbol, _p: &Position) -> Result<String> {
+///         Ok("close-1".into())
+///     }
+///     async fn get_position(&self, _symbol: &Symbol) -> Result<Position> {
+///         Ok(Position::FLAT)
+///     }
+///     async fn get_balance(&self, _currency: &str) -> Result<f64> { Ok(0.0) }
+///     fn supports(&self, c: Capability) -> bool {
+///         matches!(c, Capability::ReduceOnly)
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait ExchangeClient: Send + Sync + 'static {
     /// Short, lowercase exchange identifier — e.g. `"kucoin"`.
@@ -123,6 +154,32 @@ pub trait ExchangeClient: Send + Sync + 'static {
 /// `rustrade-supervisor` so it inherits lifecycle management and
 /// auto-restart; this trait just documents the contract on the data side.
 ///
+/// # Example
+///
+/// A loopback source that publishes a single tick and exits. Production
+/// sources hold the `MarketDataBus` sender they were constructed with
+/// and publish to it from `run`.
+///
+/// ```
+/// use async_trait::async_trait;
+/// use rustrade_core::{MarketSource, Result};
+///
+/// struct OneShotSource {
+///     name: String,
+/// }
+///
+/// #[async_trait]
+/// impl MarketSource for OneShotSource {
+///     fn name(&self) -> &str { &self.name }
+///     async fn run(&self) -> Result<()> {
+///         // In a real impl: connect to feed, loop publishing events to
+///         // the bus, return Ok(()) on clean shutdown.
+///         Ok(())
+///     }
+///     fn is_live(&self) -> bool { false }
+/// }
+/// ```
+///
 /// # Cancellation contract
 ///
 /// `run` does **not** take a `CancellationToken` directly. Cancellation is
@@ -160,6 +217,29 @@ pub trait MarketSource: Send + Sync + 'static {
 ///
 /// Adapters implement this to route fills into the bot. Most exchanges push
 /// both order updates and fill events; this trait abstracts the "fill" part.
+///
+/// # Example
+///
+/// An in-memory fill source backed by a [`tokio::sync::mpsc`] channel —
+/// useful for tests and replay drivers.
+///
+/// ```
+/// use async_trait::async_trait;
+/// use rustrade_core::{Fill, FillSource};
+/// use tokio::sync::mpsc;
+/// use tokio::sync::Mutex;
+///
+/// struct ChannelFills {
+///     rx: Mutex<mpsc::UnboundedReceiver<Fill>>,
+/// }
+///
+/// #[async_trait]
+/// impl FillSource for ChannelFills {
+///     async fn next_fill(&self) -> Option<Fill> {
+///         self.rx.lock().await.recv().await
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait FillSource: Send + Sync + 'static {
     /// Await the next fill. Returns `None` when the stream ends.
@@ -167,6 +247,29 @@ pub trait FillSource: Send + Sync + 'static {
 }
 
 /// Received order-book / market-data events from the exchange's public feed.
+///
+/// # Example
+///
+/// A simple channel-backed event source — typical for tests that push
+/// scripted ticks/candles into the bot.
+///
+/// ```
+/// use async_trait::async_trait;
+/// use rustrade_core::{EventSource, MarketDataEvent};
+/// use tokio::sync::mpsc;
+/// use tokio::sync::Mutex;
+///
+/// struct ChannelEvents {
+///     rx: Mutex<mpsc::UnboundedReceiver<MarketDataEvent>>,
+/// }
+///
+/// #[async_trait]
+/// impl EventSource for ChannelEvents {
+///     async fn next_event(&self) -> Option<MarketDataEvent> {
+///         self.rx.lock().await.recv().await
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait EventSource: Send + Sync + 'static {
     /// Await the next event. Returns `None` when the stream ends.
@@ -181,6 +284,35 @@ pub trait EventSource: Send + Sync + 'static {
 /// only spawn a candle poller when one is wired via
 /// `Bot::with_candle_poller`. Futures adapters with native candle
 /// endpoints (KuCoin, Binance, Bybit, …) implement it directly.
+///
+/// # Example
+///
+/// A fixed-series source useful for backtests and replays. The
+/// framework's poller will dedupe by `Candle::time`, so repeated polls
+/// returning the same head are safe.
+///
+/// ```
+/// use std::time::Duration;
+/// use async_trait::async_trait;
+/// use rustrade_core::{Candle, CandleSource, Result, Symbol};
+///
+/// struct FixedCandles {
+///     candles: Vec<Candle>,
+/// }
+///
+/// #[async_trait]
+/// impl CandleSource for FixedCandles {
+///     fn name(&self) -> &str { "fixed" }
+///     async fn poll(
+///         &self,
+///         _symbol: &Symbol,
+///         _interval: Duration,
+///         limit: usize,
+///     ) -> Result<Vec<Candle>> {
+///         Ok(self.candles.iter().rev().take(limit).rev().copied().collect())
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait CandleSource: Send + Sync + 'static {
     /// Short identifier for logging — typically the exchange name.

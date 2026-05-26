@@ -37,23 +37,46 @@ impl std::fmt::Display for RestartPolicy {
 /// A service that doesn't respond to cancellation will hang the whole
 /// shutdown process until the supervisor's shutdown timeout fires.
 ///
-/// ```ignore
-/// async fn run(&self, cancel: CancellationToken) -> anyhow::Result<()> {
-///     loop {
-///         tokio::select! {
-///             _ = cancel.cancelled() => break,
-///             result = self.do_work() => result?,
-///         }
-///     }
-///     Ok(())
-/// }
-/// ```
-///
 /// # Interior mutability
 ///
 /// `run` takes `&self`, so services wrapped in `Arc` work naturally. Mutable
 /// state (counters, connection handles, etc.) should use atomics, `Mutex`,
 /// or `RwLock`. This is required anyway by the `Send + Sync + 'static` bound.
+///
+/// # Example
+///
+/// A counter service that ticks every second until cancelled. Note the
+/// `tokio::select!` pattern that interleaves real work with the
+/// cancellation watch.
+///
+/// ```
+/// use std::sync::atomic::{AtomicU64, Ordering};
+/// use std::time::Duration;
+/// use async_trait::async_trait;
+/// use rustrade_supervisor::{RestartPolicy, TradingService};
+/// use tokio_util::sync::CancellationToken;
+///
+/// struct CounterService {
+///     ticks: AtomicU64,
+/// }
+///
+/// #[async_trait]
+/// impl TradingService for CounterService {
+///     fn name(&self) -> &str { "counter" }
+///     fn restart_policy(&self) -> RestartPolicy { RestartPolicy::OnFailure }
+///     async fn run(&self, cancel: CancellationToken) -> anyhow::Result<()> {
+///         let mut tick = tokio::time::interval(Duration::from_secs(1));
+///         loop {
+///             tokio::select! {
+///                 _ = cancel.cancelled() => return Ok(()),
+///                 _ = tick.tick() => {
+///                     self.ticks.fetch_add(1, Ordering::Relaxed);
+///                 }
+///             }
+///         }
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait TradingService: Send + Sync + 'static {
     /// Unique service name for logs, metrics, and supervisor identification.

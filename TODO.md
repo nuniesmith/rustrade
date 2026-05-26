@@ -353,10 +353,23 @@ Examples are the framework's UX. They double as integration tests.
 - [x] `deny.toml`: licence allow-list, advisory blocking,
       registry/git source pinning.
 
+### Phase 6c (this batch)
+
+- [x] `# Example` rustdoc block on every public trait and the major
+      framework structs. Covers `Brain`, `ExchangeClient`, `MarketSource`,
+      `FillSource`, `EventSource`, `CandleSource`, `MetricsSink`,
+      `Clock`, `TradingService`, plus `Bot`, `BotConfig`, `BotHandle`,
+      `Supervisor`, `BackoffConfig`, `PositionSizer`, `Decision`,
+      `Position`, `Order`, `Backtest`, `BacktestConfig`, `SlippageModel`,
+      `FeeModel`. (`CircuitBreaker` and `SessionPnl` already had one.)
+- [x] Coverage with `cargo-llvm-cov` surfaced in PR comments. New
+      `coverage` CI job runs after the test matrix, generates lcov +
+      a text summary, posts a sticky PR comment via
+      `marocchino/sticky-pull-request-comment`, and uploads the lcov
+      file as a 14-day artefact.
+
 ### Phase 6c — deferred
 
-- [ ] `# Example` rustdoc block on every trait and major struct.
-      (Mechanical — lower priority than narrative tutorials.)
 - [ ] `cargo publish` driver + `cargo-semver-checks` in CI. Wait
       until the first crates.io release to design the workflow against
       a real target.
@@ -364,7 +377,6 @@ Examples are the framework's UX. They double as integration tests.
 - [ ] cargo-audit weekly scheduled job (subsumed by `cargo-deny`'s
       advisory check for now; revisit if we need a separate report
       pipeline).
-- [ ] Coverage with `cargo-llvm-cov` surfaced in PR comments.
 
 ## Cross-cutting
 

@@ -8,6 +8,24 @@ use crate::fees::FeeModel;
 use crate::slippage::SlippageModel;
 
 /// Configuration for a [`crate::Backtest`].
+///
+/// # Example
+///
+/// ```
+/// use rustrade_backtest::{BacktestConfig, FeeModel, SlippageModel};
+///
+/// let config = BacktestConfig::builder()
+///     .symbol("BTCUSDT")
+///     .initial_cash(10_000.0)
+///     .slippage(SlippageModel::FixedBps(5.0))
+///     .fees(FeeModel::Flat(0.001))
+///     .periods_per_year(252 * 24 * 60) // per-minute Sharpe
+///     .build()
+///     .unwrap();
+///
+/// assert_eq!(config.initial_cash, 10_000.0);
+/// assert_eq!(config.periods_per_year, 252 * 24 * 60);
+/// ```
 #[derive(Debug, Clone)]
 pub struct BacktestConfig {
     /// Symbols the brain trades. For single-symbol backtests this is a

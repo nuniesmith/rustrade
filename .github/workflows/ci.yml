@@ -64,3 +64,46 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           rust-version: 1.94.1
+
+  coverage:
+    name: cargo-llvm-cov
+    runs-on: ubuntu-latest
+    # PR comments need write access; main pushes don't, but the job is
+    # the same shape so we keep one definition.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect coverage
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --ignore-filename-regex 'tests/|examples/'
+      - name: Coverage summary
+        id: cov
+        run: |
+          cargo llvm-cov report --summary-only --workspace --all-features --ignore-filename-regex 'tests/|examples/' | tee coverage.txt
+          {
+            echo 'summary<<EOF'
+            cat coverage.txt
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+      - name: Post coverage comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: rustrade-coverage
+          message: |
+            ### Coverage (cargo-llvm-cov)
+
+            ```
+            ${{ steps.cov.outputs.summary }}
+            ```
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov-report
+          path: lcov.info
+          retention-days: 14

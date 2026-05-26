@@ -24,6 +24,35 @@
 ///
 /// `Send + Sync + 'static` so an `Arc<dyn MetricsSink>` lives across
 /// supervised services.
+///
+/// # Example
+///
+/// A simple in-process counting sink, useful for tests and embedded
+/// dashboards.
+///
+/// ```
+/// use std::collections::HashMap;
+/// use std::sync::Mutex;
+/// use rustrade_core::MetricsSink;
+///
+/// #[derive(Default)]
+/// struct CountingSink {
+///     counters: Mutex<HashMap<String, u64>>,
+/// }
+///
+/// impl MetricsSink for CountingSink {
+///     fn counter(&self, name: &str, _labels: &[(&str, &str)], value: u64) {
+///         *self.counters.lock().unwrap().entry(name.into()).or_insert(0) += value;
+///     }
+///     fn gauge(&self, _name: &str, _labels: &[(&str, &str)], _value: f64) {}
+///     fn histogram(&self, _name: &str, _labels: &[(&str, &str)], _value: f64) {}
+/// }
+///
+/// let sink = CountingSink::default();
+/// sink.counter("rustrade_fills_routed_total", &[], 1);
+/// sink.inc("rustrade_fills_routed_total");
+/// assert_eq!(sink.counters.lock().unwrap()["rustrade_fills_routed_total"], 2);
+/// ```
 pub trait MetricsSink: Send + Sync + 'static {
     /// Increment a counter by `value`.
     fn counter(&self, name: &str, labels: &[(&str, &str)], value: u64);

@@ -43,6 +43,29 @@ impl Default for SizingConfig {
 ///
 /// Returns `0` if any input is non-positive or the resulting size rounds
 /// down to zero. Callers should treat `0` as "skip this trade — too small".
+///
+/// # Example
+///
+/// ```
+/// use rustrade_risk::{PositionSizer, SizingConfig};
+///
+/// let sizer = PositionSizer::new(SizingConfig {
+///     margin_per_trade: 500.0,
+///     leverage: 5,
+///     max_contracts: 100,
+/// });
+///
+/// // 500 USDT * 5x leverage = 2500 USDT notional.
+/// // At price 50_000 (BTC) with contract_value 0.001 BTC:
+/// //   contracts = floor(2500 / (50000 * 0.001)) = floor(50.0) = 50
+/// assert_eq!(sizer.contracts(50_000.0, 0.001), 50);
+///
+/// // Capped at max_contracts when price is low enough to "afford" more.
+/// assert_eq!(sizer.contracts(10.0, 0.001), 100);
+///
+/// // Zero on degenerate inputs.
+/// assert_eq!(sizer.contracts(0.0, 0.001), 0);
+/// ```
 pub struct PositionSizer {
     config: SizingConfig,
 }

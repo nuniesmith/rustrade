@@ -31,6 +31,29 @@ use crate::result::BacktestResult;
 /// The replay engine itself. Configure via [`BacktestConfig`], attach a
 /// [`Brain`] and one or more candle series, then `.run().await` for the
 /// result.
+///
+/// # Example
+///
+/// ```no_run
+/// # use std::sync::Arc;
+/// use rustrade_backtest::{Backtest, BacktestConfig, load_csv};
+/// # async fn run(brain: Arc<dyn rustrade_core::Brain>) -> rustrade_backtest::Result<()> {
+/// let candles = load_csv("data/btcusdt-1m.csv")?;
+/// let result = Backtest::new(
+///     BacktestConfig::builder()
+///         .symbol("BTCUSDT")
+///         .initial_cash(10_000.0)
+///         .build()?,
+///     brain,
+/// )
+/// .with_candles(candles)
+/// .run()
+/// .await?;
+///
+/// println!("{}", result.summary());
+/// # Ok(())
+/// # }
+/// ```
 pub struct Backtest {
     config: BacktestConfig,
     brain: Arc<dyn Brain>,

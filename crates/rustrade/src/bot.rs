@@ -43,6 +43,24 @@ pub struct RiskConfig {
 /// field on [`BotConfigBuilder::build`] and returns `Error::Config` on
 /// any violation — the framework never panics on bad config. `Bot::new`
 /// does a final brain-count check on top.
+///
+/// # Example
+///
+/// ```
+/// use std::time::Duration;
+/// use rustrade::BotConfig;
+///
+/// let config = BotConfig::builder()
+///     .name("market-maker")
+///     .symbols(["BTCUSDT", "ETHUSDT"])
+///     .shutdown_timeout(Duration::from_secs(5))
+///     .without_signal_handler() // tests + embedded use
+///     .build()
+///     .unwrap();
+///
+/// assert_eq!(config.name, "market-maker");
+/// assert_eq!(config.symbols.len(), 2);
+/// ```
 #[derive(Debug, Clone)]
 pub struct BotConfig {
     /// Human-readable name used in logs, tracing spans, and supervisor
@@ -242,6 +260,38 @@ impl BotConfigBuilder {
 /// and the in-process [`MarketDataBus`]. Created via [`Bot::new`]; run
 /// via [`Bot::run_until_shutdown`]; observed and steered via the
 /// [`BotHandle`] returned from [`Bot::handle`].
+///
+/// # Example
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use rustrade::{Bot, BotConfig};
+/// # struct MyBrain;
+/// # #[async_trait::async_trait]
+/// # impl rustrade_core::Brain for MyBrain {
+/// #     fn name(&self) -> &str { "x" }
+/// #     async fn on_event(&self, _: &rustrade_core::MarketDataEvent, _: &rustrade_core::Position)
+/// #         -> rustrade_core::Result<rustrade_core::Decision> {
+/// #         Ok(rustrade_core::Decision::hold())
+/// #     }
+/// #     async fn health(&self) -> rustrade_core::BrainHealth { rustrade_core::BrainHealth::ok() }
+/// # }
+/// # async fn run(exchange: Arc<dyn rustrade_core::ExchangeClient>) -> anyhow::Result<()> {
+/// let config = BotConfig::builder()
+///     .name("my-bot")
+///     .symbol("BTCUSDT")
+///     .build()?;
+///
+/// let bot = Bot::new(config, exchange, vec![Arc::new(MyBrain) as Arc<dyn rustrade_core::Brain>])?;
+/// let handle = bot.handle();
+///
+/// // Spawn the bot; ask it to shut down from elsewhere.
+/// let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+/// handle.shutdown();
+/// task.await??;
+/// # Ok(())
+/// # }
+/// ```
 pub struct Bot {
     config: BotConfig,
     supervisor: Arc<Supervisor>,

@@ -54,6 +54,42 @@ pub struct BrainHealthSnapshot {
 /// Cheap cloneable handle into a running [`Bot`](crate::Bot).
 ///
 /// See [the module docs](self) for the host-side contract.
+///
+/// # Example
+///
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use rustrade::{Bot, BotConfig, BotHandle};
+/// # async fn run(
+/// #     exchange: Arc<dyn rustrade_core::ExchangeClient>,
+/// #     brains: Vec<Arc<dyn rustrade_core::Brain>>,
+/// # ) -> anyhow::Result<()> {
+/// let config = BotConfig::builder()
+///     .name("demo")
+///     .symbol("BTCUSDT")
+///     .without_signal_handler()
+///     .build()?;
+/// let bot = Bot::new(config, exchange, brains)?;
+/// let handle: BotHandle = bot.handle();
+///
+/// // Subscribe to non-Hold decisions before the bot starts.
+/// let mut signals = handle.subscribe_signals();
+///
+/// // Drive the bot from one task, observe from another.
+/// let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+/// tokio::spawn({
+///     let handle = handle.clone();
+///     async move {
+///         while let Ok(sig) = signals.recv().await {
+///             tracing::info!(?sig, "saw a signal");
+///         }
+///         handle.shutdown();
+///     }
+/// });
+/// task.await??;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct BotHandle {
     cancel: CancellationToken,
