@@ -20,3 +20,10 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 3
+    ignore:
+      # `dtolnay/rust-toolchain` uses the git ref as the Rust toolchain
+      # version, not as an action release. Dependabot can't distinguish
+      # the two and will try to "upgrade" to Rust versions that don't
+      # exist. We pin to MSRV in `rust-toolchain.toml` and update the
+      # workflow refs manually when MSRV moves.
+      - dependency-name: "dtolnay/rust-toolchain"

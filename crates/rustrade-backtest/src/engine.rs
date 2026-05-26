@@ -2,9 +2,18 @@
 //!
 //! Single-threaded loop: feeds candles to the brain in order, builds an
 //! order from each non-`Hold` decision, applies slippage and fees, and
-//! updates a synthetic position. On position-reducing fills (closes or
-//! flips) a [`TradeOutcome`] is emitted into the result.
+//! updates a synthetic per-symbol position. On position-reducing fills
+//! (closes or flips) a [`TradeOutcome`] is emitted into the result.
+//!
+//! # Multi-symbol replay
+//!
+//! Each candle is tagged with a symbol. The engine maintains independent
+//! [`Position`] state per symbol but a *single* shared cash balance. When
+//! [`Backtest::with_candles`] is used, every candle is assumed to be for
+//! the (single) symbol on the config. For multi-symbol runs use
+//! [`Backtest::with_symbol_candles`].
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -20,42 +29,75 @@ use crate::metrics::TradeOutcome;
 use crate::result::BacktestResult;
 
 /// The replay engine itself. Configure via [`BacktestConfig`], attach a
-/// [`Brain`] and a candle series, then `.run().await` for the result.
+/// [`Brain`] and one or more candle series, then `.run().await` for the
+/// result.
 pub struct Backtest {
     config: BacktestConfig,
     brain: Arc<dyn Brain>,
-    candles: Vec<Candle>,
+    /// Per-symbol candle series. Within each series candles are assumed
+    /// to be in chronological order; across series the engine merges
+    /// chronologically before replay.
+    series: Vec<(Symbol, Vec<Candle>)>,
 }
 
 impl Backtest {
     /// Construct with a config + brain. The candle series is attached
-    /// separately via [`Self::with_candles`].
+    /// separately via [`Self::with_candles`] / [`Self::with_symbol_candles`].
     pub fn new(config: BacktestConfig, brain: Arc<dyn Brain>) -> Self {
         Self {
             config,
             brain,
-            candles: Vec::new(),
+            series: Vec::new(),
         }
     }
 
-    /// Feed a candle series. Replaces any previously attached candles.
+    /// Feed a candle series for the (single) symbol on the config.
+    /// Convenience wrapper around [`Self::with_symbol_candles`].
+    ///
+    /// Panics if the config has more than one symbol — use
+    /// [`Self::with_symbol_candles`] for multi-symbol backtests.
     pub fn with_candles(mut self, candles: Vec<Candle>) -> Self {
-        self.candles = candles;
+        assert_eq!(
+            self.config.symbols.len(),
+            1,
+            "Backtest::with_candles requires a single-symbol config; \
+             this config has {} symbols. Use Backtest::with_symbol_candles instead.",
+            self.config.symbols.len()
+        );
+        let symbol = self.config.symbols[0].clone();
+        self.series = vec![(symbol, candles)];
+        self
+    }
+
+    /// Feed a candle series for a specific symbol. Call multiple times
+    /// for multi-symbol backtests; repeated calls for the same symbol
+    /// replace the previous series.
+    ///
+    /// The engine merges all series chronologically before replay, so
+    /// the brain sees the global event stream — not per-symbol blocks.
+    pub fn with_symbol_candles(mut self, symbol: impl Into<Symbol>, candles: Vec<Candle>) -> Self {
+        let symbol = symbol.into();
+        self.series.retain(|(s, _)| s != &symbol);
+        self.series.push((symbol, candles));
         self
     }
 
     /// Run the backtest to completion. Returns the aggregated result.
     pub async fn run(self) -> Result<BacktestResult> {
-        let symbol = self.config.symbol.clone();
         let exchange = Exchange::from("backtest");
         let sizer = PositionSizer::new(self.config.sizing.clone());
 
-        let mut state = State::new(self.config.initial_cash);
+        let merged = merge_series(&self.series);
+        let candles_processed = merged.len();
+        let mut state = State::new(
+            self.config.initial_cash,
+            self.config.symbols.iter().cloned(),
+        );
         let mut signals_emitted = 0usize;
         let mut orders_filled = 0usize;
         let mut trades: Vec<TradeOutcome> = Vec::new();
 
-        for candle in &self.candles {
+        for (symbol, candle) in &merged {
             let event = MarketDataEvent::Candle {
                 exchange: exchange.clone(),
                 symbol: symbol.clone(),
@@ -63,16 +105,21 @@ impl Backtest {
             };
 
             // Brains see the live position at decision time — same as
-            // the live `ExecutionService` does.
-            let position = state.position;
+            // the live `ExecutionService` does. For symbols not in the
+            // config we still route the event through the brain (so
+            // multi-symbol brains can filter) but treat the position as
+            // FLAT and skip any orders.
+            let position = state.position(symbol).copied().unwrap_or(Position::FLAT);
             let decision = self
                 .brain
                 .on_event(&event, &position)
                 .await
                 .map_err(|e| Error::Brain(e.to_string()))?;
 
-            if matches!(decision.signal, SignalType::Hold) {
-                state.observe_equity(candle.close, self.config.contract_value);
+            let in_config = state.has_symbol(symbol);
+
+            if !in_config || matches!(decision.signal, SignalType::Hold) {
+                state.sample_step(symbol, candle.close, self.config.contract_value);
                 continue;
             }
             signals_emitted += 1;
@@ -87,11 +134,11 @@ impl Backtest {
                 candle.close,
                 self.config.contract_value,
             ) else {
-                state.observe_equity(candle.close, self.config.contract_value);
+                state.sample_step(symbol, candle.close, self.config.contract_value);
                 continue;
             };
             if qty <= 0.0 {
-                state.observe_equity(candle.close, self.config.contract_value);
+                state.sample_step(symbol, candle.close, self.config.contract_value);
                 continue;
             }
 
@@ -107,7 +154,7 @@ impl Backtest {
             // position, emit one or more TradeOutcomes.
             apply_fill(
                 &mut state,
-                &symbol,
+                symbol,
                 side,
                 qty,
                 fill_price,
@@ -137,57 +184,126 @@ impl Backtest {
                 .await
                 .map_err(|e| Error::Brain(e.to_string()))?;
 
-            state.observe_equity(candle.close, self.config.contract_value);
+            state.sample_step(symbol, candle.close, self.config.contract_value);
             let _ = is_close;
         }
 
         let total_fees: f64 = trades.iter().map(|t| t.fee).sum();
         let net_pnl: f64 = trades.iter().map(|t| t.net_pnl()).sum();
+        let symbol_label = if self.config.symbols.len() == 1 {
+            self.config.symbols[0].as_str().to_string()
+        } else {
+            // Stable, deterministic label for multi-symbol runs.
+            let parts: Vec<&str> = self.config.symbols.iter().map(|s| s.as_str()).collect();
+            parts.join(",")
+        };
+
+        let returns = state.into_returns();
         Ok(BacktestResult {
-            symbol: symbol.as_str().to_string(),
+            symbol: symbol_label,
             initial_cash: self.config.initial_cash,
             final_cash: self.config.initial_cash + net_pnl,
             net_pnl,
             total_fees,
-            candles_processed: self.candles.len(),
+            candles_processed,
             signals_emitted,
             orders_filled,
             trades,
-            max_drawdown: state.max_drawdown(),
+            max_drawdown: returns.max_drawdown,
+            equity_curve: returns.equity,
+            period_returns: returns.period_returns,
+            risk_free_rate: self.config.risk_free_rate,
+            periods_per_year: self.config.periods_per_year,
         })
     }
 }
 
+// ── Series merging ──────────────────────────────────────────────────────
+
+/// Merge per-symbol candle series into a chronological `(symbol, candle)`
+/// stream. Stable for equal timestamps: ties preserve the *order the
+/// series were attached*, then the order candles appear within their
+/// series. This keeps multi-symbol runs deterministic even if two
+/// exchanges produce identical timestamps.
+fn merge_series(series: &[(Symbol, Vec<Candle>)]) -> Vec<(Symbol, Candle)> {
+    let total: usize = series.iter().map(|(_, c)| c.len()).sum();
+    let mut out: Vec<(Symbol, Candle, usize)> = Vec::with_capacity(total);
+    for (series_idx, (sym, candles)) in series.iter().enumerate() {
+        for c in candles {
+            out.push((sym.clone(), *c, series_idx));
+        }
+    }
+    // Sort by (time, series order) — stable for matching timestamps
+    // within the same series.
+    out.sort_by(|a, b| a.1.time.cmp(&b.1.time).then(a.2.cmp(&b.2)));
+    out.into_iter().map(|(s, c, _)| (s, c)).collect()
+}
+
 // ── State + helpers ─────────────────────────────────────────────────────
 
-/// Mutable in-loop state: position, realised cash, equity HWM, drawdown.
+/// Mutable in-loop state: per-symbol position, shared realised cash,
+/// equity HWM, drawdown, and the equity / per-period returns sample
+/// stream used by Sharpe / Sortino.
 struct State {
-    position: Position,
+    positions: HashMap<Symbol, Position>,
     cash: f64,
     equity_hwm: f64,
     max_drawdown: f64,
+    // Sampled once per candle in `sample_step`, so Sharpe/Sortino see
+    // the full price path even on Hold ticks.
+    last_equity: f64,
+    equity_curve: Vec<f64>,
+    period_returns: Vec<f64>,
+    // Cached marks per symbol (last close seen) so we can compute the
+    // total portfolio equity at any sample boundary even when only one
+    // symbol's price has just changed.
+    last_marks: HashMap<Symbol, f64>,
+}
+
+struct ReturnsSummary {
+    max_drawdown: f64,
+    equity: Vec<f64>,
+    period_returns: Vec<f64>,
 }
 
 impl State {
-    fn new(initial_cash: f64) -> Self {
+    fn new(initial_cash: f64, symbols: impl IntoIterator<Item = Symbol>) -> Self {
+        let mut positions = HashMap::new();
+        for s in symbols {
+            positions.insert(s, Position::FLAT);
+        }
         Self {
-            position: Position::FLAT,
+            positions,
             cash: initial_cash,
             equity_hwm: initial_cash,
             max_drawdown: 0.0,
+            last_equity: initial_cash,
+            equity_curve: vec![initial_cash],
+            period_returns: Vec::new(),
+            last_marks: HashMap::new(),
         }
     }
 
-    /// Mark-to-market the current position at `close` and update the
-    /// drawdown tracker. Equity = realised cash + unrealised on the open
-    /// position.
-    fn observe_equity(&mut self, close: f64, contract_value: f64) {
-        let equity = if let Some(entry) = self.position.entry_price {
-            let pnl_per_unit = (close - entry) * self.position.qty.signum();
-            self.cash + pnl_per_unit * self.position.qty.abs() * contract_value
-        } else {
-            self.cash
-        };
+    fn has_symbol(&self, sym: &Symbol) -> bool {
+        self.positions.contains_key(sym)
+    }
+
+    fn position(&self, sym: &Symbol) -> Option<&Position> {
+        self.positions.get(sym)
+    }
+
+    fn position_mut(&mut self, sym: &Symbol) -> &mut Position {
+        self.positions.entry(sym.clone()).or_insert(Position::FLAT)
+    }
+
+    /// Record the latest close for a symbol, then sample portfolio
+    /// equity. The equity curve always grows by one sample per candle —
+    /// even on `Hold` ticks — so Sharpe/Sortino see the full price path.
+    fn sample_step(&mut self, sym: &Symbol, close: f64, contract_value: f64) {
+        self.last_marks.insert(sym.clone(), close);
+        let equity = self.equity_now(contract_value);
+
+        // Drawdown bookkeeping.
         if equity > self.equity_hwm {
             self.equity_hwm = equity;
         }
@@ -195,10 +311,41 @@ impl State {
         if dd < self.max_drawdown {
             self.max_drawdown = dd;
         }
+
+        self.equity_curve.push(equity);
+        // Per-period simple return on prior equity (skip the first
+        // sample — no prior period). Use prior equity to avoid divide-
+        // by-zero on a fully-drained account.
+        let prev = self.last_equity;
+        if prev > 0.0 {
+            self.period_returns.push((equity - prev) / prev);
+        } else {
+            self.period_returns.push(0.0);
+        }
+        self.last_equity = equity;
     }
 
-    fn max_drawdown(&self) -> f64 {
-        self.max_drawdown
+    /// Total portfolio equity = realised cash + sum of unrealised PnL
+    /// across all symbols using their last-known marks.
+    fn equity_now(&self, contract_value: f64) -> f64 {
+        let mut equity = self.cash;
+        for (sym, pos) in &self.positions {
+            if let Some(entry) = pos.entry_price
+                && let Some(mark) = self.last_marks.get(sym)
+            {
+                let pnl_per_unit = (mark - entry) * pos.qty.signum();
+                equity += pnl_per_unit * pos.qty.abs() * contract_value;
+            }
+        }
+        equity
+    }
+
+    fn into_returns(self) -> ReturnsSummary {
+        ReturnsSummary {
+            max_drawdown: self.max_drawdown,
+            equity: self.equity_curve,
+            period_returns: self.period_returns,
+        }
     }
 }
 
@@ -272,7 +419,10 @@ fn apply_fill(
         Side::Sell => -qty,
     };
 
-    let old_qty = state.position.qty;
+    let (old_qty, old_entry) = {
+        let p = state.position_mut(symbol);
+        (p.qty, p.entry_price)
+    };
     let new_qty = old_qty + signed_qty;
 
     // The realised-PnL portion is whatever quantity *reduces* the
@@ -286,7 +436,7 @@ fn apply_fill(
     let opening_qty = qty - closing_qty;
 
     if closing_qty > 0.0 {
-        let entry = state.position.entry_price.unwrap_or(fill_price);
+        let entry = old_entry.unwrap_or(fill_price);
         let direction = old_qty.signum();
         let gross = (fill_price - entry) * direction * closing_qty * contract_value;
         // Fee is apportioned by closing fraction so a single fill that
@@ -309,7 +459,7 @@ fn apply_fill(
         state.cash += gross - fee_share;
     }
 
-    if opening_qty > 0.0 {
+    let new_position = if opening_qty > 0.0 {
         // The fee component charged to opening.
         let fee_open = if qty > 0.0 {
             fee * (opening_qty / qty)
@@ -319,36 +469,34 @@ fn apply_fill(
         state.cash -= fee_open;
         // New entry price: if we were FLAT or fully closed first, this
         // is the fresh entry; if we'd somehow added to an existing
-        // position (same-side fill), it's a weighted average. Phase 4a
-        // doesn't pyramid since brains emit one direction at a time, but
-        // handle it correctly anyway.
+        // position (same-side fill), it's a weighted average. Brains
+        // don't pyramid in normal use since they emit one direction at
+        // a time, but handle it correctly anyway.
         let new_position_qty_after_close = old_qty + side_sign(side) * closing_qty;
         let post_open_qty = new_position_qty_after_close + side_sign(side) * opening_qty;
         let entry = if new_position_qty_after_close == 0.0 {
             fill_price
         } else {
-            let prev_entry = state.position.entry_price.unwrap_or(fill_price);
+            let prev_entry = old_entry.unwrap_or(fill_price);
             let prev_notional = prev_entry * new_position_qty_after_close.abs();
             let new_notional = fill_price * opening_qty;
             (prev_notional + new_notional) / post_open_qty.abs()
         };
-        state.position = Position {
+        Position {
             qty: post_open_qty,
             entry_price: Some(entry),
             unrealised_pnl: 0.0,
-        };
+        }
     } else if new_qty == 0.0 {
-        // Fully closed.
-        state.position = Position::FLAT;
+        Position::FLAT
     } else {
-        // Reduced but not fully closed; keep the original entry price.
-        let entry = state.position.entry_price;
-        state.position = Position {
+        Position {
             qty: new_qty,
-            entry_price: entry,
+            entry_price: old_entry,
             unrealised_pnl: 0.0,
-        };
-    }
+        }
+    };
+    *state.position_mut(symbol) = new_position;
 }
 
 fn side_sign(side: Side) -> f64 {
@@ -452,6 +600,10 @@ mod tests {
         assert_eq!(result.trades.len(), 0);
         assert_eq!(result.net_pnl, 0.0);
         assert_eq!(result.candles_processed, 50);
+        // Equity curve always seeds the initial cash, then one sample
+        // per candle.
+        assert_eq!(result.equity_curve.len(), 51);
+        assert_eq!(result.period_returns.len(), 50);
     }
 
     #[tokio::test]
@@ -505,6 +657,7 @@ mod tests {
         assert_eq!(r1.orders_filled, r2.orders_filled);
         assert_eq!(r1.trades.len(), r2.trades.len());
         assert!((r1.net_pnl - r2.net_pnl).abs() < 1e-12);
+        assert_eq!(r1.equity_curve, r2.equity_curve);
     }
 
     #[tokio::test]
@@ -521,5 +674,108 @@ mod tests {
         .unwrap();
         assert_eq!(result.orders_filled, 0);
         assert_eq!(result.trades.len(), 0);
+    }
+
+    #[test]
+    fn merge_series_interleaves_by_timestamp() {
+        let s1 = Symbol::from("AAA");
+        let s2 = Symbol::from("BBB");
+        let series = vec![
+            (
+                s1.clone(),
+                vec![
+                    Candle {
+                        time: 1000,
+                        open: 1.0,
+                        high: 1.0,
+                        low: 1.0,
+                        close: 1.0,
+                        volume: 0.0,
+                    },
+                    Candle {
+                        time: 3000,
+                        open: 1.0,
+                        high: 1.0,
+                        low: 1.0,
+                        close: 1.0,
+                        volume: 0.0,
+                    },
+                ],
+            ),
+            (
+                s2.clone(),
+                vec![
+                    Candle {
+                        time: 2000,
+                        open: 2.0,
+                        high: 2.0,
+                        low: 2.0,
+                        close: 2.0,
+                        volume: 0.0,
+                    },
+                    Candle {
+                        time: 3000,
+                        open: 2.0,
+                        high: 2.0,
+                        low: 2.0,
+                        close: 2.0,
+                        volume: 0.0,
+                    },
+                ],
+            ),
+        ];
+        let merged = merge_series(&series);
+        let times: Vec<i64> = merged.iter().map(|(_, c)| c.time).collect();
+        assert_eq!(times, vec![1000, 2000, 3000, 3000]);
+        // Tie at t=3000 is broken by series-insertion order — AAA first.
+        assert_eq!(merged[2].0, s1);
+        assert_eq!(merged[3].0, s2);
+    }
+
+    #[tokio::test]
+    async fn multi_symbol_routes_to_each_symbol_state() {
+        // Brain that goes long on AAA and short on BBB; FlipBrain takes
+        // both sides simultaneously to verify per-symbol position state.
+        struct SymBrain;
+        #[async_trait]
+        impl Brain for SymBrain {
+            fn name(&self) -> &str {
+                "sym"
+            }
+            async fn on_event(&self, e: &MarketDataEvent, _p: &Position) -> CoreResult<Decision> {
+                match e.symbol().as_str() {
+                    "AAA" => Ok(Decision::buy(1.0)),
+                    "BBB" => Ok(Decision::sell(1.0)),
+                    _ => Ok(Decision::hold()),
+                }
+            }
+            async fn health(&self) -> BrainHealth {
+                BrainHealth::ok()
+            }
+        }
+
+        let cfg = BacktestConfig::builder()
+            .symbols(["AAA", "BBB"])
+            .initial_cash(100_000.0)
+            .sizing(SizingConfig {
+                margin_per_trade: 1_000.0,
+                leverage: 1,
+                max_contracts: 100,
+            })
+            .build()
+            .unwrap();
+        let result = Backtest::new(cfg, Arc::new(SymBrain))
+            .with_symbol_candles("AAA", flat_series(5, 100.0))
+            .with_symbol_candles("BBB", flat_series(5, 200.0))
+            .run()
+            .await
+            .unwrap();
+        // 5 AAA + 5 BBB = 10 orders (every candle, both symbols).
+        assert_eq!(result.candles_processed, 10);
+        assert_eq!(result.orders_filled, 10);
+        // No closes — no completed trades yet.
+        assert_eq!(result.trades.len(), 0);
+        // Symbol label is the concatenated list.
+        assert_eq!(result.symbol, "AAA,BBB");
     }
 }

@@ -19,14 +19,15 @@
 //!
 //! # Status
 //!
-//! Phase 4a — minimum viable engine. CSV / Parquet candle loaders, Sharpe
-//! / Sortino metrics, and book-walk slippage land in Phase 4b. See the
-//! workspace `TODO.md`.
+//! Phase 4b — adds CSV candle loader, Sharpe/Sortino metrics, and
+//! multi-symbol replay. Parquet loaders and book-walk slippage remain
+//! deferred. See the workspace `TODO.md`.
 
 pub mod config;
 pub mod engine;
 pub mod error;
 pub mod fees;
+pub mod loaders;
 pub mod metrics;
 pub mod result;
 pub mod slippage;
@@ -35,6 +36,7 @@ pub use config::{BacktestConfig, BacktestConfigBuilder};
 pub use engine::Backtest;
 pub use error::{Error, Result};
 pub use fees::FeeModel;
+pub use loaders::{load_csv, load_csv_str, sort_chronological};
 pub use metrics::TradeOutcome;
 pub use result::BacktestResult;
 pub use slippage::SlippageModel;
