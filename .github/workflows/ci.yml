@@ -80,12 +80,14 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Collect coverage
-        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --ignore-filename-regex 'tests/|examples/'
+      - name: Run tests with coverage instrumentation
+        run: cargo llvm-cov --workspace --all-features --no-report
+      - name: Generate lcov report
+        run: cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex 'tests/|examples/'
       - name: Coverage summary
         id: cov
         run: |
-          cargo llvm-cov report --summary-only --workspace --all-features --ignore-filename-regex 'tests/|examples/' | tee coverage.txt
+          cargo llvm-cov report --summary-only --ignore-filename-regex 'tests/|examples/' | tee coverage.txt
           {
             echo 'summary<<EOF'
             cat coverage.txt
