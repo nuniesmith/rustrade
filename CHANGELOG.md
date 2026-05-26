@@ -10,6 +10,25 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Doc examples + coverage in CI (Phase 6c).**
+  - `# Example` rustdoc block on every public trait
+    (`Brain`, `ExchangeClient`, `MarketSource`, `FillSource`,
+    `EventSource`, `CandleSource`, `MetricsSink`, `Clock`,
+    `TradingService`) and every major framework struct
+    (`Bot`, `BotConfig`, `BotHandle`, `Supervisor`, `BackoffConfig`,
+    `PositionSizer`, `Decision`, `Position`, `Order`, `Backtest`,
+    `BacktestConfig`, `SlippageModel`, `FeeModel`). Most are
+    runnable doctests; the few that need an `ExchangeClient` /
+    `Brain` from outside the example are `no_run` and use `#`-prefixed
+    setup so docs.rs still shows the relevant code.
+  - New `coverage` CI job using `cargo-llvm-cov`. Runs on every PR
+    and every push to `main`, generates `lcov.info`, prints the
+    text summary in the workflow log, posts a sticky PR comment via
+    `marocchino/sticky-pull-request-comment` (one comment per PR,
+    edited in place on subsequent pushes), and uploads `lcov.info`
+    as a 14-day retention artefact for offline analysis.
+
+### Added
 - **Backtest engine, Phase 4b — CSV loader + Sharpe/Sortino + multi-symbol.**
   - CSV candle loader: `load_csv` (path), `load_csv_str` (in-memory),
     and `sort_chronological` for newest-first sources. Fixed

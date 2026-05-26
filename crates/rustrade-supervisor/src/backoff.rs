@@ -25,6 +25,20 @@ use rand::RngExt;
 /// Configuration for the exponential backoff strategy.
 ///
 /// All fields have sensible defaults for a production trading system.
+///
+/// # Example
+///
+/// ```
+/// use std::time::Duration;
+/// use rustrade_supervisor::BackoffConfig;
+///
+/// let cfg = BackoffConfig::new(Duration::from_millis(200), Duration::from_secs(30))
+///     .with_cooldown(Duration::from_secs(120))
+///     .with_circuit_breaker(5, Duration::from_secs(60));
+///
+/// assert_eq!(cfg.max_retries, 5);
+/// assert_eq!(cfg.base_delay, Duration::from_millis(200));
+/// ```
 #[derive(Debug, Clone)]
 pub struct BackoffConfig {
     /// Initial delay before the first retry (default: 100ms).

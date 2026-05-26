@@ -54,6 +54,28 @@ pub enum SizeHint {
 ///
 /// `signal` is always present; the other fields are hints and metadata that
 /// the execution and risk layers may or may not use.
+///
+/// # Example
+///
+/// ```
+/// use rustrade_core::{Decision, Price, SizeHint};
+///
+/// // The four constructor shapes the framework uses internally.
+/// let _hold = Decision::hold();
+/// let _close = Decision::close();
+/// let _buy = Decision::buy(0.8);
+/// let _sell = Decision::sell(0.6);
+///
+/// // Chain stop / take-profit / size hints / metadata.
+/// let decision = Decision::buy(0.9)
+///     .with_stop(Price(95.0))
+///     .with_take_profit(Price(110.0))
+///     .with_size_hint(SizeHint::MarginFraction(0.5))
+///     .with_metadata(serde_json::json!({"reason": "ema-cross"}));
+///
+/// assert_eq!(decision.stop_price, Some(Price(95.0)));
+/// assert_eq!(decision.take_profit_price, Some(Price(110.0)));
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
     /// What the brain decided to do (Buy / Sell / Hold / Close).
@@ -187,6 +209,51 @@ impl BrainHealth {
 ///
 /// `Brain` is object-safe. You can store brains as `Box<dyn Brain>` or
 /// `Arc<dyn Brain>` and swap between implementations at runtime.
+///
+/// # Example
+///
+/// A minimal brain that goes long when the close is above a fixed
+/// threshold and flat otherwise. Note the `Mutex<State>` pattern for
+/// any cross-call state.
+///
+/// ```
+/// use std::sync::Mutex;
+/// use async_trait::async_trait;
+/// use rustrade_core::{
+///     Brain, BrainHealth, Decision, MarketDataEvent, Position, Result,
+/// };
+///
+/// struct ThresholdBrain {
+///     threshold: f64,
+///     state: Mutex<usize>, // events seen
+/// }
+///
+/// #[async_trait]
+/// impl Brain for ThresholdBrain {
+///     fn name(&self) -> &str { "threshold" }
+///
+///     async fn on_event(
+///         &self,
+///         event: &MarketDataEvent,
+///         position: &Position,
+///     ) -> Result<Decision> {
+///         *self.state.lock().unwrap() += 1;
+///         let close = match event {
+///             MarketDataEvent::Candle { candle, .. } => candle.close,
+///             _ => return Ok(Decision::hold()),
+///         };
+///         if close > self.threshold && position.qty <= 0.0 {
+///             Ok(Decision::buy(1.0))
+///         } else if close <= self.threshold && position.qty > 0.0 {
+///             Ok(Decision::close())
+///         } else {
+///             Ok(Decision::hold())
+///         }
+///     }
+///
+///     async fn health(&self) -> BrainHealth { BrainHealth::ok() }
+/// }
+/// ```
 #[async_trait]
 pub trait Brain: Send + Sync + 'static {
     /// Human-readable identifier used in logs and metrics.

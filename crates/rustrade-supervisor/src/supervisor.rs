@@ -245,6 +245,27 @@ impl SpawnOptions {
 /// values. Completed task memory is reclaimed immediately, making this safe
 /// for long-running processes that may restart services hundreds of times
 /// over weeks of operation.
+///
+/// # Example
+///
+/// ```no_run
+/// # use std::sync::atomic::AtomicU64;
+/// # use async_trait::async_trait;
+/// # use rustrade_supervisor::{Supervisor, SupervisorConfig, TradingService};
+/// # use tokio_util::sync::CancellationToken;
+/// # struct MyService;
+/// # #[async_trait]
+/// # impl TradingService for MyService {
+/// #     fn name(&self) -> &str { "x" }
+/// #     async fn run(&self, _cancel: CancellationToken) -> anyhow::Result<()> { Ok(()) }
+/// # }
+/// # async fn run() -> anyhow::Result<()> {
+/// let supervisor = Supervisor::new(SupervisorConfig::default());
+/// supervisor.spawn_service(Box::new(MyService));
+/// supervisor.run_until_shutdown().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct Supervisor {
     config: SupervisorConfig,
     tracker: TaskTracker,

@@ -43,7 +43,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      - name: Run tests (captured)
+        shell: bash
+        run: |
+          set -o pipefail
+          # --nocapture so any panic output reaches the log even when the
+          # test framework would normally swallow stdout/stderr of passing
+          # peers around it.
+          cargo test --workspace --all-features -- --nocapture 2>&1 | tee test-output.txt
+      - name: Upload test output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-${{ matrix.os }}
+          path: test-output.txt
+          retention-days: 14
 
   doc:
     name: cargo doc
@@ -64,3 +78,48 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           rust-version: 1.94.1
+
+  coverage:
+    name: cargo-llvm-cov
+    runs-on: ubuntu-latest
+    # PR comments need write access; main pushes don't, but the job is
+    # the same shape so we keep one definition.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run tests with coverage instrumentation
+        run: cargo llvm-cov --workspace --all-features --no-report
+      - name: Generate lcov report
+        run: cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex 'tests/|examples/'
+      - name: Coverage summary
+        id: cov
+        run: |
+          cargo llvm-cov report --summary-only --ignore-filename-regex 'tests/|examples/' | tee coverage.txt
+          {
+            echo 'summary<<EOF'
+            cat coverage.txt
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+      - name: Post coverage comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: rustrade-coverage
+          message: |
+            ### Coverage (cargo-llvm-cov)
+
+            ```
+            ${{ steps.cov.outputs.summary }}
+            ```
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov-report
+          path: lcov.info
+          retention-days: 14

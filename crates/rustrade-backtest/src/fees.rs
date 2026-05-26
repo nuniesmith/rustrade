@@ -7,6 +7,21 @@
 use serde::{Deserialize, Serialize};
 
 /// Pluggable fee schedule.
+///
+/// # Example
+///
+/// ```
+/// use rustrade_backtest::FeeModel;
+///
+/// // 5 bps flat fee.
+/// let f = FeeModel::Flat(0.0005);
+/// assert!((f.fee_for(100.0, 10.0, true) - 0.5).abs() < 1e-9);
+///
+/// // Different maker / taker rates.
+/// let mt = FeeModel::MakerTaker { maker: 0.0002, taker: 0.0006 };
+/// assert!((mt.fee_for(100.0, 1.0, true) - 0.06).abs() < 1e-9);
+/// assert!((mt.fee_for(100.0, 1.0, false) - 0.02).abs() < 1e-9);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FeeModel {
     /// Zero fees — useful for sanity-checking PnL against a pure

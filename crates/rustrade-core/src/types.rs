@@ -218,6 +218,21 @@ impl StopAttachment {
 /// This is the framework-level abstraction; concrete exchange adapters translate
 /// it into exchange-specific payloads. The `client_id` is optional but strongly
 /// recommended — it lets the framework reconcile fills back to this order.
+///
+/// # Example
+///
+/// ```
+/// use rustrade_core::{Order, Price, Side, StopAttachment, Volume};
+///
+/// // Market order — the everyday case.
+/// let mkt = Order::market("BTCUSDT", Side::Buy, Volume(2.0));
+/// assert_eq!(mkt.symbol.as_str(), "BTCUSDT");
+///
+/// // Limit order with a stop-market attachment.
+/// let limit = Order::limit("ETHUSDT", Side::Sell, Volume(1.0), Price(3_500.0))
+///     .with_stop(StopAttachment::stop_market(Price(3_400.0)));
+/// assert!(limit.stop.is_some());
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
     /// Symbol the order is for.
@@ -319,6 +334,25 @@ pub struct Fill {
 /// Current exchange-reported position for a single symbol.
 ///
 /// `qty` is signed: positive = long, negative = short, zero = flat.
+///
+/// # Example
+///
+/// ```
+/// use rustrade_core::{Position, Side};
+///
+/// // A 2-contract long opened at 100.
+/// let long = Position {
+///     qty: 2.0,
+///     entry_price: Some(100.0),
+///     unrealised_pnl: 0.0,
+/// };
+/// assert!(!long.is_flat());
+/// assert_eq!(long.close_side(), Some(Side::Sell)); // close a long with a sell
+///
+/// // The constant for "no position".
+/// assert!(Position::FLAT.is_flat());
+/// assert!(Position::FLAT.close_side().is_none());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct Position {
     /// Signed position size — positive = long, negative = short.

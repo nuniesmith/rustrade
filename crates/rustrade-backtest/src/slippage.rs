@@ -13,6 +13,20 @@ use serde::{Deserialize, Serialize};
 ///
 /// Pluggable: future variants can include book-walk slippage (which
 /// needs an order-book replay, not just candles) or per-symbol overrides.
+///
+/// # Example
+///
+/// ```
+/// use rustrade_backtest::SlippageModel;
+/// use rustrade_core::Side;
+///
+/// // 5 bps adverse slippage applied symmetrically.
+/// let m = SlippageModel::FixedBps(5.0);
+/// let buy = m.apply(Side::Buy, 100.0);
+/// let sell = m.apply(Side::Sell, 100.0);
+/// assert!((buy - 100.05).abs() < 1e-9);
+/// assert!((sell - 99.95).abs() < 1e-9);
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub enum SlippageModel {
     /// No slippage — fills land exactly at the reference price.

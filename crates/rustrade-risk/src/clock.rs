@@ -29,6 +29,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// `Debug` is a supertrait so types that store an `Arc<dyn Clock>` (like
 /// [`CircuitBreaker`](crate::CircuitBreaker) and
 /// [`SessionPnl`](crate::SessionPnl)) can still `#[derive(Debug)]`.
+///
+/// # Example
+///
+/// A frozen clock — useful when a test wants every primitive to see the
+/// exact same time without any drift between calls.
+///
+/// ```
+/// use rustrade_risk::clock::Clock;
+///
+/// #[derive(Debug)]
+/// struct FrozenClock(u64);
+///
+/// impl Clock for FrozenClock {
+///     fn now_unix_secs(&self) -> u64 { self.0 }
+/// }
+///
+/// let clock = FrozenClock(1_700_000_000);
+/// assert_eq!(clock.now_unix_secs(), 1_700_000_000);
+/// assert_eq!(clock.utc_day_number(), 1_700_000_000 / 86_400);
+/// ```
 pub trait Clock: std::fmt::Debug + Send + Sync + 'static {
     /// Current time in seconds since the UNIX epoch.
     fn now_unix_secs(&self) -> u64;
