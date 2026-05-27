@@ -19,14 +19,14 @@ Scope reminder (decided 2026-05):
 
 ## Status snapshot
 
-| Crate                  | State          | Tests           | Blockers                                      |
-| ---------------------- | -------------- | --------------- | --------------------------------------------- |
-| `rustrade-core`        | usable         | 0 unit, 0 doc   | trait surface not yet locked (see decisions)  |
-| `rustrade-supervisor`  | skeleton       | 0               | restart logic, backoff, lifecycle are stubs   |
-| `rustrade-risk`        | complete       | 13 unit + 2 doc | none                                          |
-| `rustrade-backtest`    | not started    | -               | waits on facade                               |
-| `rustrade` (facade)    | not started    | -               | waits on supervisor port                      |
-| examples               | none           | -               | waits on facade                               |
+| Crate                  | State          | Tests                       | Blockers                                  |
+| ---------------------- | -------------- | --------------------------- | ----------------------------------------- |
+| `rustrade-core`        | complete       | 30 unit + 7 doc             | none                                      |
+| `rustrade-supervisor`  | complete       | 56 unit + 1 doc             | none                                      |
+| `rustrade-risk`        | complete       | 29 unit + 3 doc             | none                                      |
+| `rustrade-backtest`    | complete       | 31 unit + 8 integ           | none                                      |
+| `rustrade` (facade)    | complete       | 13 unit + 4 integ suites    | none                                      |
+| examples (4)           | complete       | all run end-to-end          | none                                      |
 
 ---
 
@@ -34,17 +34,17 @@ Scope reminder (decided 2026-05):
 
 The framework is shippable when **all** of these are true:
 
-- [ ] `cargo test --workspace --all-features` passes on stable Rust.
-- [ ] `cargo doc --workspace --no-deps` builds with zero warnings.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
-- [ ] `examples/noop-bot` runs a `Bot` with a `NoopBrain` + mock
+- [x] `cargo test --workspace --all-features` passes on stable Rust.
+- [x] `cargo doc --workspace --no-deps` builds with zero warnings.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
+- [x] `examples/noop-bot` runs a `Bot` with a `NoopBrain` + mock
       `ExchangeClient` for 10 s and shuts down cleanly on Ctrl-C.
-- [ ] `examples/sma-cross-bot` runs the same way against a deterministic
+- [x] `examples/sma-cross-bot` runs the same way against a deterministic
       replay feed and produces a non-zero, reproducible PnL.
-- [ ] All four open design decisions below are answered in code, not docs.
-- [ ] CI green on Linux + macOS for stable + MSRV.
-- [ ] `CHANGELOG.md` and per-crate `README.md` written.
-- [ ] First-time-user tutorial ("a bot in 50 lines") exists.
+- [x] All four open design decisions below are answered in code, not docs.
+- [x] CI green on Linux + macOS for stable + MSRV.
+- [x] `CHANGELOG.md` and per-crate `README.md` written.
+- [x] First-time-user tutorial ("a bot in 50 lines") exists.
 
 ---
 
@@ -380,17 +380,28 @@ Examples are the framework's UX. They double as integration tests.
 
 ## Cross-cutting
 
-- [ ] **CI** (`.github/workflows/ci.yml`):
-  - [ ] fmt: `cargo fmt --check`
-  - [ ] clippy: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-  - [ ] test: `cargo test --workspace --all-features`
-  - [ ] doc: `cargo doc --workspace --no-deps`
-  - [ ] MSRV: same matrix on `1.94.1`
-  - [ ] Matrix: ubuntu-latest, macos-latest (skip windows until someone needs it)
-- [ ] `cargo-audit` weekly scheduled job.
-- [ ] `cargo-deny` for licence + duplicate-dep policy.
-- [ ] Coverage with `cargo-llvm-cov`; surface in PR comments.
-- [ ] Dependabot for Cargo + GitHub Actions.
+- [x] **CI** (`.github/workflows/ci.yml`):
+  - [x] fmt: `cargo fmt --check`
+  - [x] clippy: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  - [x] test: `cargo test --workspace --all-features`
+  - [x] doc: `cargo doc --workspace --no-deps`
+  - [x] MSRV: pinned to `1.94.1` via `rust-toolchain.toml` + the
+        `cargo test (ubuntu-latest|macos-latest)` matrix using
+        `dtolnay/rust-toolchain@1.94.1`. A separate
+        `cargo test (ubuntu-latest, stable)` job exercises whatever
+        `stable` resolves to today so future-incompat and new-lint
+        regressions surface before downstream users hit them.
+  - [x] Matrix: ubuntu-latest + macos-latest on MSRV; ubuntu-latest on
+        stable. Windows is intentionally skipped until someone needs it.
+- [x] `cargo-deny` for licence + duplicate-dep policy.
+- [x] Coverage with `cargo-llvm-cov`; sticky PR comment via
+      `marocchino/sticky-pull-request-comment`.
+- [x] Dependabot for Cargo + GitHub Actions (with
+      `dtolnay/rust-toolchain` on the ignore list — its ref encodes a
+      Rust version, not an action release).
+- [ ] `cargo-audit` weekly scheduled job. Subsumed by `cargo-deny`'s
+      advisory check today; revisit when we need a separate report
+      pipeline.
 
 ---
 
@@ -407,9 +418,14 @@ Lifted from [`NEXT_STEPS.md §"Things to explicitly decide"`](./NEXT_STEPS.md).
       -> f64` with a `1.0` default. The sizer continues to take an explicit
       `contract_value` argument for now — wiring the adapter through is
       the facade's job (Phase 2).
-- [ ] **Parameter overrides.** Deferred to Phase 2 (facade). The shape
-      lands when the `Bot`/`BotConfig` types do; risk and brain configs
-      already own their own structs.
+- [x] **Parameter overrides.** Resolved: option (a) + (c) — each
+      subsystem owns its own config struct (`SizingConfig`,
+      `SessionPnlConfig`, `CircuitBreakerConfig` etc., bundled into
+      `RiskConfig` on `BotConfig`), and brain-specific strategy params
+      stay entirely opaque to the framework. Downstream Optuna-style
+      tuners can swap individual subsystem configs without touching the
+      others, and brain authors are free to load their own params via
+      whatever mechanism they prefer (env, JSON, custom builder).
 
 ---
 

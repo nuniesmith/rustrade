@@ -59,6 +59,22 @@ jobs:
           path: test-output.txt
           retention-days: 14
 
+  test_stable:
+    name: cargo test (ubuntu-latest, stable)
+    runs-on: ubuntu-latest
+    # Confirms the workspace still builds and tests on whatever Rust
+    # `stable` resolves to today — catches future-incompatibility
+    # warnings, new clippy lints, and stdlib deprecations before users
+    # on stable hit them. Single OS to keep CI cost down; the macOS
+    # matrix already covers platform-portability against MSRV.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: stable
+      - run: cargo test --workspace --all-features
+
   doc:
     name: cargo doc
     runs-on: ubuntu-latest

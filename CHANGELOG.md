@@ -10,6 +10,27 @@ version if you depend on `rustrade` before then.
 ## [Unreleased]
 
 ### Added
+- **Ship-prep cleanup.**
+  - New `cargo test (ubuntu-latest, stable)` CI job alongside the
+    existing MSRV (1.94.1) matrix. Uses `dtolnay/rust-toolchain@stable`
+    so it tracks whatever `stable` resolves to today — catches
+    future-incompat warnings, new clippy lints, and stdlib
+    deprecations before downstream users on stable hit them. Kept to
+    one OS so CI cost only grows by ~30 %; the macOS axis already
+    covers platform portability against MSRV.
+
+### Changed
+- **TODO.md reconciled with reality.** The Status snapshot now
+  reflects what's actually shipped (every crate complete, every test
+  count current). All Definition-of-Done boxes are ticked. The
+  Cross-cutting CI checklist is marked done where the workflow now
+  has it, with `cargo-audit` remaining noted as deferred-but-subsumed
+  by `cargo-deny`. The last open design decision (Parameter
+  overrides) is resolved: the as-built architecture already answers
+  it — each subsystem owns its own config struct, brain params are
+  framework-opaque.
+
+### Added
 - **Doc examples + coverage in CI (Phase 6c).**
   - `# Example` rustdoc block on every public trait
     (`Brain`, `ExchangeClient`, `MarketSource`, `FillSource`,
