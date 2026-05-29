@@ -724,6 +724,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "csv",
+ "proptest",
  "rustrade-core",
  "rustrade-risk",
  "serde",

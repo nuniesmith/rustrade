@@ -13,7 +13,7 @@
 //! the (single) symbol on the config. For multi-symbol runs use
 //! [`Backtest::with_symbol_candles`].
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -112,6 +112,20 @@ impl Backtest {
 
         let merged = merge_series(&self.series);
         let candles_processed = merged.len();
+
+        // Reject non-finite / non-positive prices up front. A single
+        // `NaN` close would otherwise propagate through the equity curve
+        // and silently turn every downstream metric (Sharpe, Sortino,
+        // drawdown) into `NaN`. Fail loud instead.
+        for (symbol, candle) in &merged {
+            if let Err(why) = validate_candle(candle) {
+                return Err(Error::Data(format!(
+                    "{symbol} candle at t={}: {why}",
+                    candle.time
+                )));
+            }
+        }
+
         let mut state = State::new(
             self.config.initial_cash,
             self.config.symbols.iter().cloned(),
@@ -268,7 +282,14 @@ fn merge_series(series: &[(Symbol, Vec<Candle>)]) -> Vec<(Symbol, Candle)> {
 /// equity HWM, drawdown, and the equity / per-period returns sample
 /// stream used by Sharpe / Sortino.
 struct State {
-    positions: HashMap<Symbol, Position>,
+    // `BTreeMap`, not `HashMap`: `equity_now` sums unrealised PnL by
+    // iterating this map, and float addition is not associative. A
+    // `HashMap`'s per-process-randomized iteration order would make a
+    // multi-symbol equity curve (and thus Sharpe/Sortino) differ in the
+    // last ULP between otherwise-identical runs, breaking the engine's
+    // determinism guarantee. `BTreeMap` iterates in sorted symbol order,
+    // so the summation order is fixed across runs.
+    positions: BTreeMap<Symbol, Position>,
     cash: f64,
     equity_hwm: f64,
     max_drawdown: f64,
@@ -279,8 +300,9 @@ struct State {
     period_returns: Vec<f64>,
     // Cached marks per symbol (last close seen) so we can compute the
     // total portfolio equity at any sample boundary even when only one
-    // symbol's price has just changed.
-    last_marks: HashMap<Symbol, f64>,
+    // symbol's price has just changed. `BTreeMap` for the same
+    // determinism reason as `positions`.
+    last_marks: BTreeMap<Symbol, f64>,
 }
 
 struct ReturnsSummary {
@@ -291,7 +313,7 @@ struct ReturnsSummary {
 
 impl State {
     fn new(initial_cash: f64, symbols: impl IntoIterator<Item = Symbol>) -> Self {
-        let mut positions = HashMap::new();
+        let mut positions = BTreeMap::new();
         for s in symbols {
             positions.insert(s, Position::FLAT);
         }
@@ -303,7 +325,7 @@ impl State {
             last_equity: initial_cash,
             equity_curve: vec![initial_cash],
             period_returns: Vec::new(),
-            last_marks: HashMap::new(),
+            last_marks: BTreeMap::new(),
         }
     }
 
@@ -370,6 +392,30 @@ impl State {
             period_returns: self.period_returns,
         }
     }
+}
+
+/// Validate a candle's OHLCV fields are usable: prices finite and
+/// strictly positive, volume finite and non-negative. Returns a
+/// human-readable reason on the first offending field.
+///
+/// OHLC *ordering* (`high >= low`, etc.) is intentionally not enforced —
+/// the goal is to keep `NaN`/`inf`/negative values out of the
+/// mark-to-market math, not to police exchange data quality.
+pub(crate) fn validate_candle(c: &Candle) -> std::result::Result<(), String> {
+    for (name, v) in [
+        ("open", c.open),
+        ("high", c.high),
+        ("low", c.low),
+        ("close", c.close),
+    ] {
+        if !v.is_finite() || v <= 0.0 {
+            return Err(format!("{name}={v} (prices must be finite and > 0)"));
+        }
+    }
+    if !c.volume.is_finite() || c.volume < 0.0 {
+        return Err(format!("volume={} (must be finite and >= 0)", c.volume));
+    }
+    Ok(())
 }
 
 /// Resolve a `Decision` into a concrete `(side, qty, is_close)`.
@@ -800,5 +846,132 @@ mod tests {
         assert_eq!(result.trades.len(), 0);
         // Symbol label is the concatenated list.
         assert_eq!(result.symbol, "AAA,BBB");
+    }
+
+    // ── Candle validation ───────────────────────────────────────────────
+
+    fn good_candle() -> Candle {
+        Candle {
+            time: 0,
+            open: 1.0,
+            high: 1.0,
+            low: 1.0,
+            close: 1.0,
+            volume: 1.0,
+        }
+    }
+
+    #[test]
+    fn validate_candle_accepts_finite_positive() {
+        assert!(validate_candle(&good_candle()).is_ok());
+        // Zero volume is legitimate (illiquid candle).
+        let c = Candle {
+            volume: 0.0,
+            ..good_candle()
+        };
+        assert!(validate_candle(&c).is_ok());
+    }
+
+    #[test]
+    fn validate_candle_rejects_non_finite_and_non_positive_prices() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            let c = Candle {
+                close: bad,
+                ..good_candle()
+            };
+            assert!(
+                validate_candle(&c).is_err(),
+                "close={bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_candle_rejects_negative_or_nan_volume() {
+        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+            let c = Candle {
+                volume: bad,
+                ..good_candle()
+            };
+            assert!(
+                validate_candle(&c).is_err(),
+                "volume={bad} should be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_rejects_non_finite_candle() {
+        // A NaN close passed straight through `with_candles` (bypassing
+        // the CSV loader) must still be caught — otherwise it poisons
+        // the equity curve and every metric silently.
+        let mut series = flat_series(5, 100.0);
+        series[2].close = f64::NAN;
+        let err = Backtest::new(
+            cfg(),
+            Arc::new(FixedBrain {
+                signal: SignalType::Hold,
+            }),
+        )
+        .with_candles(series)
+        .run()
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Data(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn multi_symbol_equity_curve_deterministic_across_runs() {
+        // Regression test for the HashMap-iteration-order determinism
+        // bug: with two simultaneously-open positions, `equity_now` sums
+        // unrealised PnL across the per-symbol map. Float addition isn't
+        // associative, so a randomized map order would make the equity
+        // curve differ run-to-run. `BTreeMap` fixes the order. Prices
+        // are deliberately awkward so reordering *would* change the ULPs.
+        struct DualLong;
+        #[async_trait]
+        impl Brain for DualLong {
+            fn name(&self) -> &str {
+                "dual-long"
+            }
+            async fn on_event(&self, e: &MarketDataEvent, p: &Position) -> CoreResult<Decision> {
+                if p.qty == 0.0 && matches!(e, MarketDataEvent::Candle { .. }) {
+                    Ok(Decision::buy(1.0))
+                } else {
+                    Ok(Decision::hold())
+                }
+            }
+            async fn health(&self) -> BrainHealth {
+                BrainHealth::ok()
+            }
+        }
+
+        let run = || async {
+            let cfg = BacktestConfig::builder()
+                .symbols(["AAA", "BBB", "CCC"])
+                .initial_cash(1_000_000.0)
+                .sizing(SizingConfig {
+                    margin_per_trade: 1_000.0,
+                    leverage: 1,
+                    max_contracts: 100,
+                })
+                .build()
+                .unwrap();
+            Backtest::new(cfg, Arc::new(DualLong))
+                .with_symbol_candles("AAA", ramp_series(40, 100.13, 0.37))
+                .with_symbol_candles("BBB", ramp_series(40, 250.07, -0.19))
+                .with_symbol_candles("CCC", ramp_series(40, 33.31, 0.53))
+                .run()
+                .await
+                .unwrap()
+        };
+
+        let r1 = run().await;
+        let r2 = run().await;
+        // Bit-exact across runs — not just approximately equal.
+        assert_eq!(r1.equity_curve, r2.equity_curve);
+        assert_eq!(r1.period_returns, r2.period_returns);
+        assert_eq!(r1.net_pnl.to_bits(), r2.net_pnl.to_bits());
+        assert_eq!(r1.max_drawdown.to_bits(), r2.max_drawdown.to_bits());
     }
 }

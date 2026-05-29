@@ -10,6 +10,13 @@ pub enum Error {
     #[error("backtest configuration error: {0}")]
     Config(String),
 
+    /// Candle data was structurally valid but contained an unusable value
+    /// — a non-finite (`NaN`/`±inf`) or negative OHLCV field. Caught at
+    /// load time and at the start of [`crate::Backtest::run`] so a single
+    /// bad row can't silently poison the equity curve and metrics.
+    #[error("invalid candle data: {0}")]
+    Data(String),
+
     /// The `Brain` returned an error while processing a candle.
     #[error("brain error during backtest: {0}")]
     Brain(String),

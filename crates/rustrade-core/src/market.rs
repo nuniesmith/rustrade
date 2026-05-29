@@ -32,7 +32,7 @@ impl Side {
 /// stays string-typed rather than pretending to enumerate them, but the
 /// newtype prevents accidental confusion with other free-form `String`
 /// fields (URLs, account ids, error messages, …).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Symbol(pub String);
 
