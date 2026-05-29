@@ -9,6 +9,37 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+### Changed
+- **Facade integration tests now use deterministic virtual time
+  (Tier 2 resilience).** Every timing-dependent test across
+  `phase_2c`, `phase_2d`, `risk_gates`, and `bot_lifecycle` runs under
+  `#[tokio::test(start_paused = true)]`. Wall-clock `sleep`/deadline
+  polling — the source of a long-running macOS CI flake that went red
+  on five consecutive PRs — is gone: ready tasks fully drain before the
+  virtual clock advances, so assertions see settled state regardless of
+  runner speed. The two prefetch-race tests additionally seed the
+  position via the *exchange* before startup (so `prefetch_positions`
+  reads the seed) instead of racing it through the handle. Stress-run
+  50× locally with zero failures; the suite now completes in
+  milliseconds instead of seconds.
+
+### Added
+- **Brain-panic isolation test.** `tests/brain_panic.rs` proves a
+  `Brain` that panics inside `on_event` unwinds only its own supervised
+  `ExecutionService` task — a sibling brain keeps processing and the bot
+  still drains cleanly on shutdown. The `Brain::on_event` docs gain a
+  `# Panics` section spelling out the contract: panics are bugs, not
+  control flow, and a `panic = "abort"` release build aborts the whole
+  process (no task-level isolation there) — return `Err` for anything
+  recoverable.
+- **CSV loader fuzzing.** `crates/rustrade-backtest/tests/loader_robustness.rs`
+  is a stable, every-PR proptest asserting `load_csv_str` never panics
+  and never emits a non-finite candle across thousands of arbitrary and
+  structured-hostile inputs. A coverage-guided `cargo-fuzz` harness over
+  the same entry point lives in the workspace-excluded `fuzz/` crate
+  (nightly-only; see `fuzz/README.md`) — verified to build and ran
+  386k iterations crash-free.
+
 ### Fixed
 - **Multi-symbol backtests are now actually deterministic.**
   `Backtest`'s engine summed unrealised PnL by iterating a `HashMap`,

@@ -124,7 +124,7 @@ where
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn happy_path_buy_places_order() {
     let brain = Arc::new(FixedSignalBrain {
         signal: SignalType::Buy,
@@ -168,7 +168,7 @@ async fn happy_path_buy_places_order() {
     let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn session_halt_blocks_buy_order() {
     let brain = Arc::new(FixedSignalBrain {
         signal: SignalType::Buy,
@@ -213,7 +213,7 @@ async fn session_halt_blocks_buy_order() {
     let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn circuit_breaker_blocks_buy_order() {
     let brain = Arc::new(FixedSignalBrain {
         signal: SignalType::Buy,
@@ -259,7 +259,7 @@ async fn circuit_breaker_blocks_buy_order() {
     let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sizer_zero_blocks_buy_order() {
     let brain = Arc::new(FixedSignalBrain {
         signal: SignalType::Buy,
@@ -301,7 +301,7 @@ async fn sizer_zero_blocks_buy_order() {
     let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn close_positions_on_shutdown_invokes_close() {
     let brain = Arc::new(FixedSignalBrain {
         signal: SignalType::Hold,
@@ -346,7 +346,7 @@ async fn close_positions_on_shutdown_invokes_close() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn close_decision_emits_reduce_only_order_against_position() {
     let brain = Arc::new(FixedSignalBrain {
         signal: SignalType::Close,
@@ -392,7 +392,7 @@ async fn close_decision_emits_reduce_only_order_against_position() {
     let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn close_decision_on_flat_position_is_silent_noop() {
     let brain = Arc::new(FixedSignalBrain {
         signal: SignalType::Close,

@@ -44,6 +44,10 @@ members = [
     "examples/multi-brain-bot",
     "examples/embed-in-service",
 ]
+# `fuzz/` is a nightly-only cargo-fuzz crate (needs libFuzzer + -Zsanitizer).
+# Excluded so `cargo build/test --workspace` on stable never tries to build
+# it. It also carries its own `[workspace]` table to fully detach.
+exclude = ["fuzz"]
 resolver = "3"
 
 [workspace.package]
