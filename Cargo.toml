@@ -7,8 +7,8 @@
 #   rustrade-core       : types, traits, buses — zero runtime, zero deps on I/O
 #   rustrade-supervisor : service lifecycle with backoff + circuit breakers
 #   rustrade-risk       : generic risk primitives (sizing, breakers, session PnL)
-#   rustrade-backtest   : replay engine — depends on core, NOT on supervisor  [skeleton]
-#   rustrade            : facade crate — re-exports everything + Bot builder  [skeleton]
+#   rustrade-backtest   : replay engine — depends on core, NOT on supervisor
+#   rustrade            : facade crate — re-exports everything + Bot builder
 #
 # Design rules
 # ------------
@@ -22,15 +22,14 @@
 #      does not ship any indicator implementations — just the `Brain` trait
 #      that consumes them.
 #
-# Build status (as of initial skeleton)
-# -------------------------------------
-#   ✅ rustrade-core        — complete, compiles clean
-#   🟡 rustrade-supervisor  — compiles with minimal skeleton; needs port
-#                              of janus-core/supervisor/{backoff,lifecycle,mod}.rs
-#   ✅ rustrade-risk        — complete with 13 passing tests
-#   ⬜ rustrade-backtest    — not yet populated (dir exists, no Cargo.toml)
-#   ⬜ rustrade             — not yet populated (dir exists, no Cargo.toml)
-#   ⬜ examples/noop-bot    — not yet populated
+# Build status (0.1.0)
+# --------------------
+#   ✅ rustrade-core        — complete, 30 unit + 7 doc tests
+#   ✅ rustrade-supervisor  — complete, full restart/backoff/lifecycle port
+#   ✅ rustrade-risk        — complete, 29 unit + 3 doc tests
+#   ✅ rustrade-backtest    — complete, CSV loader + Sharpe/Sortino + multi-symbol
+#   ✅ rustrade             — complete facade, Bot builder + supervised services
+#   ✅ examples             — noop / sma-cross / multi-brain / embed-in-service
 # ============================================================================
 
 [workspace]

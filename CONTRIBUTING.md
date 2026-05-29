@@ -85,12 +85,12 @@ references in lockstep — `rustrade` always uses the same minor version
 of `rustrade-core`/`rustrade-supervisor`/`rustrade-risk`/`rustrade-backtest`
 that it ships with — at the cost of per-crate flexibility.
 
-Until 0.1.0 ships, any release may contain breaking changes; the
-`CHANGELOG.md` flags them with **BREAKING** on the relevant bullet.
-Pin to an exact version (`rustrade = "=0.1.0"`) until the API
-stabilises.
+0.1.0 is tagged. While the workspace is in `0.x`, any minor release may
+contain breaking changes; the `CHANGELOG.md` flags them with **BREAKING**
+on the relevant bullet. Pin to an exact version (`rustrade = "=0.1.0"`)
+until the API stabilises at 1.0.
 
-Future publish workflow (Phase 6b):
+Publish workflow (run in this order; not yet automated):
 
 1. `cargo publish -p rustrade-core`
 2. `cargo publish -p rustrade-supervisor`
