@@ -4,10 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-Until 0.1.0 ships, breaking changes may land in any release; pin to an exact
-version if you depend on `rustrade` before then.
+All crates are versioned together at the workspace level; the whole
+workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
+
+_Nothing yet — the slate is clean after 0.1.0._
+
+## [0.1.0] - 2026-05-29
+
+First tagged release. The framework is feature-complete against its 0.1.0
+[definition of done](./TODO.md): every crate is usable, CI is green on
+Linux + macOS across MSRV (1.94.1) and stable, and workspace coverage is
+~91% lines. Everything below was developed across the Phase 0–6 batches
+and is collected here as the 0.1.0 surface.
 
 ### Added
 - **Ship-prep cleanup.**
@@ -415,4 +425,5 @@ Pre-release skeleton. See [`TODO.md`](./TODO.md) for the 0.1.0 ship criteria.
 - `rustrade-backtest` — directory reserved; not yet populated.
 - `rustrade` (facade) — directory reserved; not yet populated.
 
-[Unreleased]: https://github.com/nuniesmith/rustrade/compare/main...HEAD
+[Unreleased]: https://github.com/nuniesmith/rustrade/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/nuniesmith/rustrade/releases/tag/v0.1.0

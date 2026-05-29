@@ -5,10 +5,10 @@ service lifecycle, supervision, risk primitives, buses, traits — that every
 trading bot rewrites from scratch. Plug in your own exchange adapter,
 indicator stack, and strategy (`Brain`) and you get a production-ready bot.
 
-> **Status: 0.1.0 skeleton.** The `rustrade-core` and `rustrade-risk` crates
-> are complete and tested. `rustrade-supervisor` compiles but needs its full
-> supervisor logic ported from `janus-core/supervisor/`. `rustrade-backtest`
-> and the top-level `rustrade` facade crate are not yet populated.
+> **Status: 0.1.0.** All five crates are complete and tested — core,
+> supervisor, risk, backtest, and the `rustrade` facade. CI is green on
+> Linux + macOS across MSRV (1.94.1) and stable, with ~91% line coverage.
+> Not yet published to crates.io; depend on it via a git dependency for now.
 
 ---
 
@@ -79,22 +79,21 @@ Zero-runtime type layer. Defines:
 No I/O. No tokio runtime state. No optional features. Every other rustrade
 crate depends on this; this one depends on nothing internal.
 
-### `rustrade-supervisor` 🟡 skeleton
+### `rustrade-supervisor` ✅ complete
 
 Structured service lifecycle. Every long-running task in your bot (WS feed,
 candle poller, heartbeat, brain) implements `TradingService` and is spawned
 through a `Supervisor` that handles:
 
 - Graceful shutdown via `CancellationToken` propagation
-- Exponential-backoff restart with per-service circuit breakers
-- Service lifecycle state machine (Starting → Running → Restarting → Terminated)
-- Optional Prometheus metrics (feature-gated)
+- Exponential-backoff restart (full jitter) with per-service circuit breakers
+- Service lifecycle state machine (Starting → Running → BackingOff → Stopping → Terminated)
+- Optional Prometheus metrics (feature-gated, crate-local registry)
 
-The skeleton compiles and responds to Ctrl-C/SIGTERM. The full backoff +
-lifecycle + chaos-test suite needs to be lifted from `janus-core/supervisor/`
-(see the porting checklist at the top of `supervisor.rs`).
+Full restart loop, lifecycle state machine, and chaos-test suite are in
+place (56 unit tests including three chaos tests).
 
-### `rustrade-risk` ✅ complete, 13 passing tests
+### `rustrade-risk` ✅ complete, 29 passing tests
 
 Generic trading risk primitives. Nothing strategy- or exchange-specific.
 
@@ -108,15 +107,23 @@ Generic trading risk primitives. Nothing strategy- or exchange-specific.
   (price × contract_value). Includes `max_contracts` cap and bailout-on-zero
   guard for all degenerate inputs.
 
-### `rustrade-backtest` ⬜ not yet populated
+### `rustrade-backtest` ✅ complete
 
-Planned: replay engine with zero-lookahead guarantees, slippage models,
-fee simulation, and the performance metrics suite (Sharpe, Sortino,
-drawdown, profit factor). Lift target: `janus-main/crates/backtest/`.
+Deterministic replay engine driven by the **same** `Brain` trait the live
+bot uses — no backtest-specific strategy code. Ships:
 
-### `rustrade` ⬜ not yet populated
+- Single-threaded synchronous replay over a `Vec<Candle>` (or multi-symbol
+  series merged chronologically)
+- Pluggable `SlippageModel` (`Zero`, `FixedBps`) and `FeeModel` (`Zero`,
+  `Flat`, `MakerTaker`)
+- CSV candle loader (`load_csv` / `load_csv_str` / `sort_chronological`)
+- Performance metrics: total return, win rate, profit factor, max drawdown,
+  Sharpe / Sortino, plus the full per-trade ledger and equity curve
 
-Top-level facade crate. Planned API:
+### `rustrade` ✅ complete
+
+Top-level facade crate — the one most users depend on directly. It pulls in
+and re-exports the others and adds the `Bot` builder:
 
 ```rust
 use rustrade::{Bot, BotConfig};
@@ -124,9 +131,6 @@ use rustrade::{Bot, BotConfig};
 let config = BotConfig::builder()
     .name("my-bot")
     .symbols(["BTCUSDT", "ETHUSDT"])
-    .poll_secs(20)
-    .sim_mode(false)
-    .close_positions_on_shutdown(true)
     .build()?;
 
 Bot::new(config, exchange, brains)
@@ -134,47 +138,45 @@ Bot::new(config, exchange, brains)
     .await
 ```
 
-This is the crate most users will depend on directly; it pulls in and
-re-exports the others.
+`Bot` owns a `Supervisor`, your `ExchangeClient`, one or more `Brain`s, and
+the in-process buses. Optional services (market feed, fill routing, candle
+polling) attach via `with_market_source` / `with_fill_source` /
+`with_candle_poller`. A cloneable `BotHandle` exposes shutdown, health, and
+signal subscription for the host.
 
 ---
 
-## Testing the skeleton
+## Testing
 
-The `rustrade-core` and `rustrade-risk` crates are fully tested. On rustc
-1.94+ with edition 2024:
+On rustc 1.94+ with edition 2024:
 
 ```
-cargo test --workspace
+cargo test --workspace --all-features
 ```
 
-Expected: 13 passing unit tests + 2 passing doc tests.
-
-During development this skeleton was also verified to compile on rustc 1.75
-after trivial edition-2021 adjustments (let-chain → nested if in one place);
-the committed source uses the edition-2024 idiom.
+The full suite is ~160 unit + integration + doc tests across the five
+crates and the four examples. The same five commands CI runs (`fmt`,
+`clippy`, `test`, `doc`, `cargo-deny`) are documented in
+[`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ---
 
 ## What's next
 
-See `NEXT_STEPS.md` for the proposed build order. The short version:
+0.1.0 is feature-complete for embedded use. Post-0.1 candidates, roughly in
+priority order (see [`TODO.md`](./TODO.md) for the full list):
 
-1. **Port the supervisor.** Lift `backoff.rs`, `lifecycle.rs`, and the main
-   `JanusSupervisor` impl from `janus-core` verbatim; rename to
-   `Supervisor`/`TradingService`; gate Prometheus behind the feature flag.
-2. **Populate `rustrade` (facade).** Write the `Bot` builder that wires a
-   `Vec<Arc<dyn Brain>>` + `Arc<dyn ExchangeClient>` into a running
-   supervised system. Biggest piece: the candle-poll + private-WS tasks
-   that the kucoin v1 main.rs currently hand-spawns.
-3. **Port kucoin to the framework.** See `/home/claude/kucoin_v2/` for a
-   code-shaped sketch of what this looks like. The `SarBrain` is written
-   in full; the main.rs drops from 1239 lines to ~120.
-4. **Extract `rustrade-backtest`.** Lower priority — wait until the live
-   path is stable.
-5. **Extract `janus` to its own repo.** After rustrade is battle-tested,
-   the neuromorphic code (brain regions, LTN, cortex, …) moves to a
-   private repo that depends on rustrade and implements the `Brain` trait.
+1. **Publish to crates.io** in dependency order (core → supervisor → risk →
+   backtest → rustrade).
+2. **A `StateStore` trait** so session PnL and breaker state survive restarts
+   (0.1 is in-memory only).
+3. **Backtest depth:** Parquet loader, book-walk slippage (needs order-book
+   replay), expectancy / avg-win-loss metrics.
+4. **A reference exchange adapter** in its own crate, demonstrating the
+   `ExchangeClient` / `MarketSource` / `FillSource` contracts end-to-end.
+
+Explicit non-goals for now: an HTTP/gRPC control plane, a built-in indicator
+library, and bundled exchange adapters — those live in downstream crates.
 
 ---
 
