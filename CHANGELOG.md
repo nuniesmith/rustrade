@@ -9,7 +9,34 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
-_Nothing yet — the slate is clean after 0.1.0._
+### Fixed
+- **Multi-symbol backtests are now actually deterministic.**
+  `Backtest`'s engine summed unrealised PnL by iterating a `HashMap`,
+  whose per-process-randomized order made the equity curve (and thus
+  Sharpe/Sortino) differ by a ULP between otherwise-identical runs once
+  two or more positions were open — violating the engine's headline
+  determinism guarantee. The per-symbol position and mark maps are now
+  `BTreeMap`s (sorted, fixed iteration order). Regression test
+  `multi_symbol_equity_curve_deterministic_across_runs` asserts a
+  bit-identical equity curve / PnL across two runs with three open
+  positions. Single-symbol runs were never affected.
+
+### Added
+- **NaN/inf/negative candle guards.** `load_csv` / `load_csv_str` and
+  `Backtest::run` now reject non-finite or non-positive OHLC prices and
+  non-finite/negative volume with the new `Error::Data` variant, instead
+  of letting one bad value silently turn the whole equity curve and
+  every metric into `NaN`. OHLC *ordering* is intentionally not policed.
+- **Property tests for the engine** (`tests/engine_properties.rs`, via
+  `proptest`). Random candle series × random decision streams assert the
+  invariants that must hold for any input: no `NaN`/`inf` leaks,
+  `net_pnl == Σ trade.net_pnl`, `total_fees == Σ trade.fee`,
+  `final_cash == initial + net_pnl`, correct curve/return lengths,
+  non-positive drawdown, and bit-identical determinism across reruns.
+
+### Changed
+- **(`rustrade-core`)** `Symbol` now derives `PartialOrd`/`Ord` so it can
+  key a `BTreeMap`. Additive — it gains trait impls, breaks nothing.
 
 ## [0.1.0] - 2026-05-29
 

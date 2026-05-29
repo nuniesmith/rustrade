@@ -72,7 +72,10 @@ pub fn load_csv<P: AsRef<Path>>(path: P) -> Result<Vec<Candle>> {
                 idx + 2 // +1 for 1-based, +1 for header
             ))
         })?;
-        out.push(row.into());
+        let candle: Candle = row.into();
+        crate::engine::validate_candle(&candle)
+            .map_err(|why| Error::Data(format!("CSV row {}: {why}", idx + 2)))?;
+        out.push(candle);
     }
     Ok(out)
 }
@@ -88,7 +91,10 @@ pub fn load_csv_str(s: &str) -> Result<Vec<Candle>> {
     for (idx, row) in rdr.deserialize::<CandleRow>().enumerate() {
         let row =
             row.map_err(|e| Error::Config(format!("CSV row {} parse error: {e}", idx + 2)))?;
-        out.push(row.into());
+        let candle: Candle = row.into();
+        crate::engine::validate_candle(&candle)
+            .map_err(|why| Error::Data(format!("CSV row {}: {why}", idx + 2)))?;
+        out.push(candle);
     }
     Ok(out)
 }
@@ -141,6 +147,28 @@ time,open,high,low,close,volume
 ";
         let err = load_csv_str(csv).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn load_csv_str_rejects_non_positive_price() {
+        // Structurally valid f64, but a zero/negative price is unusable.
+        let csv = "\
+time,open,high,low,close,volume
+1000,1.0,2.0,0.5,0.0,10.0
+";
+        let err = load_csv_str(csv).unwrap_err();
+        assert!(matches!(err, Error::Data(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_csv_str_rejects_non_finite_price() {
+        // f64::from_str parses "inf"/"NaN"; validation must reject them.
+        let csv = "\
+time,open,high,low,close,volume
+1000,1.0,2.0,0.5,inf,10.0
+";
+        let err = load_csv_str(csv).unwrap_err();
+        assert!(matches!(err, Error::Data(_)), "got {err:?}");
     }
 
     #[test]
