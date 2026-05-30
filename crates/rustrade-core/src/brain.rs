@@ -266,6 +266,19 @@ pub trait Brain: Send + Sync + 'static {
     /// at the time this call is made. May be [`Position::FLAT`].
     ///
     /// Return [`Decision::hold`] for "do nothing" — this is always safe.
+    /// For any recoverable problem (stale data, transient compute error),
+    /// return `Err` rather than panicking: the framework logs the error
+    /// and keeps the service running.
+    ///
+    /// # Panics
+    ///
+    /// Treat a panic here as a hard bug, never as control flow. Each brain
+    /// runs in its own supervised task, so under `panic = "unwind"` a panic
+    /// is contained to that task and sibling brains keep running. But a
+    /// release build compiled with `panic = "abort"` (as this workspace
+    /// does) will abort the **entire process** on any panic — there is no
+    /// isolation in that configuration. Return `Err` for anything you want
+    /// to survive.
     async fn on_event(&self, event: &MarketDataEvent, position: &Position) -> Result<Decision>;
 
     /// Called after the exchange confirms a fill. Informational only —

@@ -195,7 +195,7 @@ fn make_fill(symbol: &str, side: Side, qty: f64) -> Fill {
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn external_cancel_triggers_bot_shutdown() {
     let bot = Bot::new(
         BotConfig::builder()
@@ -228,7 +228,7 @@ async fn external_cancel_triggers_bot_shutdown() {
     assert!(handle.is_shutting_down());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn signal_subscribers_see_non_hold_decisions() {
     let bot = Bot::new(
         BotConfig::builder()
@@ -265,7 +265,7 @@ async fn signal_subscribers_see_non_hold_decisions() {
     let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn market_feed_service_runs_until_shutdown() {
     let bot = Bot::new(
         BotConfig::builder()
@@ -311,7 +311,7 @@ async fn market_feed_service_runs_until_shutdown() {
     let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn fill_routing_service_delivers_to_brain_and_refreshes_cache() {
     let (brain, seen) = FillRecordingBrain::new();
     let exchange = CountingExchange::new();

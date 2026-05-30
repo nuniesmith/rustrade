@@ -82,7 +82,7 @@ fn candle_event(symbol: &str) -> MarketDataEvent {
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn bot_routes_market_events_to_brain_and_drains_cleanly() {
     let (brain, event_count) = CountingBrain::new();
 
@@ -143,7 +143,7 @@ async fn bot_routes_market_events_to_brain_and_drains_cleanly() {
     assert!(result.is_ok(), "bot returned error: {result:?}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn bot_handle_health_reports_running_service() {
     let (brain, _) = CountingBrain::new();
     let bot = Bot::new(
@@ -185,7 +185,7 @@ async fn bot_handle_health_reports_running_service() {
     let _ = tokio::time::timeout(Duration::from_secs(3), bot_task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn external_shutdown_via_handle_clone_drains_bot() {
     let (brain, _) = CountingBrain::new();
     let bot = Bot::new(
