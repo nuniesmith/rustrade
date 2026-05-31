@@ -1,457 +1,325 @@
 # TODO
 
 Living checklist for `rustrade`. Pairs with [`NEXT_STEPS.md`](./NEXT_STEPS.md)
-(porting plan) and [`README.md`](./README.md) (design overview). When in doubt,
-that document explains *why*; this one tracks *what's left*.
+(original porting plan), [`README.md`](./README.md) (design overview), and
+[`CHANGELOG.md`](./CHANGELOG.md) (what actually shipped, per release). When in
+doubt, those explain *why* and *what shipped*; this one tracks *what's left*.
 
-Scope reminder (decided 2026-05):
+Scope reminder (revisited 2026-05):
 
-- **Consumption model:** embedded library only. Downstream services depend on
-  the `rustrade` crate and call `Bot::new(...).run().await`. No HTTP/gRPC
-  control plane, no IPC, no message-bus integration in 0.1.
-- **Exchanges:** rustrade ships zero exchange adapters. The framework only
-  defines `ExchangeClient` / `MarketSource` traits; concrete adapters live in
-  downstream crates (e.g. `exchange-apiws`).
-- **Persistence:** in-memory only for 0.1. Session PnL, breaker state, etc.
-  reset on restart. A `StateStore` trait is a 0.2 concern.
+- **Consumption model:** embedded library. Downstream services depend on the
+  `rustrade` crate and call `Bot::new(...).run_until_shutdown().await`. No
+  HTTP/gRPC control plane in the core framework (a host can wrap one around
+  `BotHandle`).
+- **Exchanges:** rustrade ships zero *real* exchange adapters — the framework
+  defines `ExchangeClient` / `MarketSource` / `FillSource` / `CandleSource`
+  traits; concrete adapters live in downstream crates (e.g. `exchange-apiws`).
+  A **simulated/paper** reference adapter is in scope (see 0.3) because it
+  proves the trait surface without binding to a venue.
+- **Persistence:** in-memory in 0.1. **Promoted to the 0.2 headline** — a
+  `StateStore` trait so session PnL / breaker state survive restarts.
 
 ---
 
 ## Status snapshot
 
-| Crate                  | State          | Tests                       | Blockers                                  |
-| ---------------------- | -------------- | --------------------------- | ----------------------------------------- |
-| `rustrade-core`        | complete       | 30 unit + 7 doc             | none                                      |
-| `rustrade-supervisor`  | complete       | 56 unit + 1 doc             | none                                      |
-| `rustrade-risk`        | complete       | 29 unit + 3 doc             | none                                      |
-| `rustrade-backtest`    | complete       | 31 unit + 8 integ           | none                                      |
-| `rustrade` (facade)    | complete       | 13 unit + 4 integ suites    | none                                      |
-| examples (4)           | complete       | all run end-to-end          | none                                      |
+`main` is green at **0.1.0**: ~200 tests (unit + integration + doc + proptest
++ fuzz + 3 chaos) pass on stable; `clippy -D warnings` clean;
+`cargo doc --no-deps` clean. CI runs Linux + macOS on MSRV (1.94.1) + stable.
+
+| Crate                  | State    | Tests                    |
+| ---------------------- | -------- | ------------------------ |
+| `rustrade-core`        | shipped  | 30 unit + 10 doc         |
+| `rustrade-supervisor`  | shipped  | 56 unit + 3 doc          |
+| `rustrade-risk`        | shipped  | 29 unit + 5 doc          |
+| `rustrade-backtest`    | shipped  | 38 unit + 13 integ + doc |
+| `rustrade` (facade)    | shipped  | 13 unit + 19 integ       |
+| examples (4)           | shipped  | run end-to-end           |
 
 ---
 
-## Definition of done for 0.1.0
+## Shipped in 0.1.0 (Phases 0–6)
 
-The framework is shippable when **all** of these are true:
+Condensed — full detail is in `CHANGELOG.md` and the PR history (#1–#23).
 
-- [x] `cargo test --workspace --all-features` passes on stable Rust.
-- [x] `cargo doc --workspace --no-deps` builds with zero warnings.
-- [x] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
-- [x] `examples/noop-bot` runs a `Bot` with a `NoopBrain` + mock
-      `ExchangeClient` for 10 s and shuts down cleanly on Ctrl-C.
-- [x] `examples/sma-cross-bot` runs the same way against a deterministic
-      replay feed and produces a non-zero, reproducible PnL.
-- [x] All four open design decisions below are answered in code, not docs.
-- [x] CI green on Linux + macOS for stable + MSRV.
-- [x] `CHANGELOG.md` and per-crate `README.md` written.
-- [x] First-time-user tutorial ("a bot in 50 lines") exists.
+- **Phase 0** — workspace hygiene: `.gitignore`, `rust-toolchain.toml`,
+  `CHANGELOG.md`, `CONTRIBUTING.md`, per-crate READMEs, `.editorconfig`,
+  `rustfmt.toml`, `clippy.toml`.
+- **Phase 1** — supervisor port (backoff + lifecycle + restart policies +
+  3 chaos tests), `rustrade-core` trait lockdown (`Symbol` newtype,
+  `StopAttachment`, `Capability`, `contract_value`), risk-crate polish
+  (`Clock`/`ManualClock`, proptest sizer).
+- **Phase 2** — the `rustrade` facade: `Bot`/`BotConfig`/`BotHandle`,
+  risk-gated `ExecutionService`, `MarketFeedService` / `FillRoutingService` /
+  `CandlePollerService`, `MetricsSink` + `CandleSource`, auto-PnL feeding,
+  external `CancellationToken`, signal subscription.
+- **Phase 3** — four examples (`noop`, `sma-cross`, `multi-brain`,
+  `embed-in-service`) doubling as integration tests.
+- **Phase 4** — `rustrade-backtest`: deterministic replay on the same `Brain`
+  trait, slippage/fee models, CSV loader, Sharpe/Sortino, multi-symbol.
+- **Phase 5** — service-integration ergonomics: config validation, channel
+  capacities, documented resource SLAs.
+- **Phase 6** — docs (quickstart + 4 tutorials), CI (fmt/clippy/test/doc/deny),
+  dependabot, `# Example` rustdoc on every public item, `cargo-llvm-cov`
+  coverage in PR comments.
+- **Post-0.1 hardening (unreleased)** — virtual-time tests, brain-panic
+  isolation, CSV fuzzing, multi-symbol determinism fix, NaN/inf candle guards.
+  *(Not yet versioned — see 0.1.1 below.)*
 
----
-
-## Phase 0 — Workspace hygiene (½ day)
-
-Cheap items that make everything else easier. Do these first.
-
-- [x] Add `.gitignore` covering `target/`, `.idea/`, `.vscode/`, `*.swp`,
-      `.DS_Store`, `*.log`. `Cargo.lock` is committed (workspace has
-      planned binaries).
-- [x] Pin `rust-toolchain.toml` to `1.94.1` (matches workspace MSRV).
-- [x] Fix duplicated `# rustrade` heading at bottom of `README.md`
-      (line 184 was a leftover).
-- [x] Add `CHANGELOG.md` (Keep-a-Changelog format, `Unreleased` section).
-- [x] Add `CONTRIBUTING.md` with: build/test commands, branch naming,
-      commit-message convention, "no merge commits inside feature
-      branches" rule.
-- [x] Add per-crate `README.md` stubs and wire `readme = "README.md"`
-      into each `Cargo.toml`.
-- [x] Add `.editorconfig` (4-space indent, LF, final newline).
-- [x] Add `rustfmt.toml` (edition 2024, max_width 100; nightly-only
-      `group_imports`/`imports_granularity` documented as comments).
-- [x] Add `clippy.toml` with `msrv = "1.94.1"`.
-
-## Phase 1 — Finish the framework (~1 week)
-
-Blocker for everything else. The facade can't be built on a stub supervisor.
-
-### Supervisor port — see [`NEXT_STEPS.md §1`](./NEXT_STEPS.md)
-
-- [x] Lift `janus-core/supervisor/backoff.rs` verbatim into
-      `crates/rustrade-supervisor/src/backoff.rs`. Replace placeholder.
-- [x] Lift `janus-core/supervisor/lifecycle.rs` verbatim into
-      `crates/rustrade-supervisor/src/lifecycle.rs`. Replace placeholder.
-- [x] Lift `JanusSupervisor` from `janus-core/supervisor/mod.rs` into
-      `supervisor.rs`. Renamed to `Supervisor` / `TradingService`.
-- [x] Gate every prometheus call behind `#[cfg(feature = "prometheus")]`.
-- [x] Add a local `prometheus::Registry` in `OnceLock` — new
-      `crates/rustrade-supervisor/src/prometheus.rs`; host services
-      `gather()` from `prometheus::registry()` instead of a global registry.
-- [x] Wire `TradingService::restart_policy()` into the supervisor's
-      restart decision (`Always`, `OnFailure`, `Never` all honoured).
-- [x] Fix the lifecycle insertion race — the initial `ServiceLifecycle`
-      is now inserted synchronously inside `service_loop` before any work
-      starts.
-- [x] Port the three chaos tests verbatim: `test_chaos_exponential_backoff`,
-      `test_chaos_circuit_breaker_trips`, `test_chaos_mixed_fleet`.
-
-### Core trait surface lockdown
-
-The traits in `rustrade-core` are the framework's public ABI for downstream
-crates. Breaking them post-0.1 hurts every dependent. Audit and lock now.
-
-- [x] **Unit tests for `rustrade-core`.** Added 27 unit tests covering
-      `Decision` builders, `Position::close_side`, `Side::opposite`,
-      `MarketDataEvent::symbol/exchange`, `Tick::mid_price/spread`,
-      `Symbol` ergonomics, `StopAttachment`/`StopKind` constructors,
-      and serde roundtrips for `Order`, `Decision`, `Signal`, `Symbol`.
-- [x] Replace `String` symbol fields with `Symbol` newtype for
-      consistency: `Tick.symbol`, `Order.symbol`, `Fill.symbol`, all
-      relevant `ExchangeClient` and `Brain` parameters.
-- [x] **Leverage:** per-adapter via constructor (decision (b) from below).
-      No change to `Order` — adapters configure leverage at construction.
-- [x] **Stop orders:** added `Order.stop: Option<StopAttachment>` carrying
-      a `StopKind` enum. Opaque to the framework; adapters interpret.
-- [x] **Contract multipliers:** added
-      `ExchangeClient::contract_value(&Symbol) -> f64` with a `1.0`
-      default. Spot adapters need not override.
-- [x] Add `ExchangeClient::supports(capability: Capability) -> bool`
-      introspection. Default returns `false` for every variant —
-      pessimistic, so a new adapter doesn't quietly accept orders it
-      can't execute.
-- [x] Document the cancellation contract on `MarketSource::run` — the
-      future is dropped by the wrapping `TradingService`; implementors
-      must be drop-safe (see updated trait docstring).
-
-### Risk crate polish
-
-- [x] Added 7 `proptest`-based property tests for `PositionSizer`: cap
-      respected, monotone in margin, monotone in leverage, zero on every
-      degenerate input flavour, and matches `floor(margin·leverage /
-      (price·cv))` against a reference computation.
-- [x] Added `Clock` trait + `SystemClock` (default) + `ManualClock`
-      (tests) in the new `clock` module. `CircuitBreaker::with_clock`
-      and `SessionPnl::with_clock` constructors accept any `Arc<dyn
-      Clock>`; existing `::new` constructors keep the default
-      `SystemClock` so production code doesn't move.
-- [x] UTC rollover verified end-to-end via `ManualClock`-driven
-      `SessionPnl::tick()` test. Sliding-window eviction and cooldown
-      auto-reset on `CircuitBreaker::tick()` also covered.
-
-## Phase 2 — Build the `rustrade` facade (~1–2 weeks)
-
-The crate downstream services actually depend on. Lives in
-`crates/rustrade/`. Split into three reviewable tracks like Phase 1.
-
-### Phase 2a — minimum viable facade
-
-- [x] Create `crates/rustrade/Cargo.toml` and add to workspace members.
-- [x] `lib.rs` re-exports `core`, `risk`, and selected `supervisor`
-      items. Downstream `use rustrade::*` covers the public surface.
-- [x] `bot::BotConfig` + `BotConfigBuilder`. Phase 2a fields: name,
-      symbols, shutdown_timeout, install_signal_handler,
-      market_bus_capacity, close_positions_on_shutdown (reserved; not
-      yet honoured). Poll cadence / sim mode wait for 2b.
-- [x] `bot::Bot::new(config, exchange, brains) -> Result<Self>`.
-- [x] `Bot::run_until_shutdown(self) -> anyhow::Result<()>` — spawns
-      services, drives the supervisor, drains on exit.
-- [x] `Bot::handle() -> BotHandle` — cheap cloneable handle with
-      `shutdown()`, `await_shutdown()`, `is_shutting_down()`, `health()`.
-- [x] `BotHealth` aggregate combining per-service `ServiceLifecycleSnapshot`s
-      and per-`Brain` health into one snapshot.
-- [x] `ExecutionService` (Phase 2a scope only): subscribes to
-      `MarketDataBus`, calls `brain.on_event` for each event. Records
-      `events_processed` / `events_dropped` via atomics. **Risk gating
-      and order placement land in Phase 2b.**
-- [x] `logging::init_tracing()` opinionated default subscriber.
-- [x] Integration tests in `crates/rustrade/tests/bot_lifecycle.rs`
-      against the public API only.
-
-### Phase 2b — risk-gated execution (this batch)
-
-- [x] Expand `ExecutionService`: wire `Decision` through the risk
-      gates in this order — `SessionPnl::is_session_halted` →
-      `CircuitBreaker::is_tripped` → `PositionSizer::contracts` →
-      `ExchangeClient::place_order`. Each gate emits a structured
-      `tracing` event on block.
-- [x] Position-cache (`PositionCache`) prefetched on `Bot::run_until_shutdown`
-      startup via `exchange.get_position(symbol)`. `ExecutionService`
-      reads it before each `brain.on_event` call.
-- [x] `RiskConfig` (session-PnL + circuit-breaker + sizing) in
-      `BotConfig` with builder methods. Per-symbol overrides deferred
-      to a future phase.
-- [x] Wire `Bot::config().close_positions_on_shutdown` to a real
-      close-on-stop hook via `ExchangeClient::close_position`.
-- [x] `BotHandle::record_trade_outcome(symbol, gross, fee)` so brains
-      / host code can feed PnL into the gates while the automated
-      fill routing waits for Phase 2c.
-
-### Phase 2c — optional services + observability (this batch)
-
-- [x] `MarketFeedService` — drives a `MarketSource` under supervisor
-      control. Wired via `Bot::with_market_source(...)`. Source
-      implementors publish to the bus they were constructed with.
-- [x] `FillRoutingService` — polls a `FillSource`, calls
-      `brain.on_fill` on every brain, and refreshes the per-symbol
-      position cache from `ExchangeClient::get_position`. Wired via
-      `Bot::with_fill_source(...)`. Auto-feed of realised PnL into the
-      risk state is deferred until entry-price-aware PnL accounting
-      lands; for now hosts continue to call `record_trade_outcome`.
-- [x] `BotHandle::subscribe_signals() -> broadcast::Receiver<Signal>`.
-      `ExecutionService` publishes on every non-`Hold` decision before
-      gates run.
-- [x] Externally-owned `CancellationToken` support via
-      `Bot::with_external_cancel(token)` — internal linker task,
-      no host-side glue required.
-
-### Phase 2d
-
-- [x] `MetricsSink` trait + `NoopSink` default in `rustrade-core`;
-      `Bot::with_metrics(Arc<dyn MetricsSink>)` plugs in a host-owned
-      backend. Framework services emit
-      `rustrade_fills_routed_total`, `rustrade_candles_published_total`,
-      `rustrade_realised_pnl_quote`, etc.
-- [x] `CandleSource` trait in `rustrade-core` — separate from
-      `MarketSource` because polling has a different shape than
-      streaming.
-- [x] `CandlePollerService` wired via `Bot::with_candle_poller(source,
-      symbol, interval, poll_cadence, limit)`. Per-symbol cadences via
-      repeated calls. Deduplicates by `Candle::time`.
-- [x] Auto-feed realised PnL into the risk state from
-      `FillRoutingService` using weighted-average entry accounting
-      (same model the backtest engine uses). Reducing fills emit
-      `record_close` + win/loss on the breaker; flip fills emit PnL
-      for the closed portion only.
-
-## Phase 3 — Examples & end-to-end validation
-
-Examples are the framework's UX. They double as integration tests.
-
-- [x] `examples/noop-bot/` — `NoopBrain` (always `Decision::hold`), mock
-      `ExchangeClient`. Runs for N seconds (default 10), shuts down via
-      `BotHandle::shutdown`, asserts no orders placed.
-- [x] `examples/sma-cross-bot/` — fast(5)/slow(20) SMA-crossover brain
-      against a deterministic sinusoidal candle replay driven by a
-      `MarketSource`. Ships a `#[tokio::test]` that pins down the order
-      count for regression testing.
-- [x] `examples/multi-brain-bot/` — two brains, each filtering events
-      to its own symbol. Asserts per-brain event counts.
-- [x] `examples/embed-in-service/` — host service with its own tokio
-      runtime and `CancellationToken` that drives the bot via
-      `Bot::with_external_cancel` + `bot.market_data_bus()` +
-      `BotHandle::subscribe_signals`. Reference for downstream consumers.
-- [x] Integration test harness already in place from Phase 2:
-      `bot_lifecycle.rs`, `risk_gates.rs`, `phase_2c.rs` boot a bot with
-      a scripted mock exchange and assert on the sequence of orders /
-      signals / lifecycle events.
-
-## Phase 4 — Backtest engine
-
-### Phase 4a — minimum viable engine (this batch)
-
-- [x] Create `crates/rustrade-backtest/Cargo.toml`, add to workspace.
-- [x] Single-threaded synchronous replay engine: feeds candles to a
-      `Brain` in order, applies slippage + fees, tracks position +
-      realised PnL, emits `TradeOutcome`s for every reducing fill.
-- [x] Pluggable slippage models: `Zero`, `FixedBps`.
-- [x] Pluggable fee schedules: `Zero`, `Flat`, `MakerTaker`.
-- [x] Performance metrics in `BacktestResult`: total return, win rate,
-      profit factor, max drawdown, per-trade ledger.
-- [x] Brain-identical guarantee: `tests/sma_replay.rs` runs the same
-      `impl Brain` shape as `examples/sma-cross-bot/` through the
-      engine. The trait is the contract; no engine-specific brain code.
-- [x] Determinism: pinned down by two-run regression test
-      `deterministic_replay_same_brain_same_series`.
-
-### Phase 4b (this batch)
-
-- [x] CSV candle loader (`load_csv` / `load_csv_str` /
-      `sort_chronological`). Fixed `time,open,high,low,close,volume`
-      column layout; supports `#` comments and rejects malformed rows
-      with `Error::Config`. Parquet and exchange-native dumps remain
-      out of scope; users can write against `Backtest::with_candles`.
-- [x] Sharpe / Sortino metrics on `BacktestResult`. Per-candle equity
-      sampling drives `equity_curve` and `period_returns`;
-      `BacktestConfig.risk_free_rate` + `periods_per_year` configure
-      annualisation. Returns `None` for fewer than two samples or zero
-      variance (Sharpe) / no downside (Sortino).
-- [x] Multi-symbol backtest. `BacktestConfig.symbols: Vec<Symbol>` with
-      a `symbol()` accessor for single-symbol convenience.
-      `Backtest::with_symbol_candles(symbol, candles)` for multi-symbol
-      runs; the engine merges all series chronologically before replay
-      and keeps independent `Position` state per symbol against a
-      shared cash balance.
-
-### Phase 4b — deferred
-
-- [ ] **Zero-lookahead invariant** baked into the bus / event layer
-      rather than enforced by convention. Today the engine guarantees
-      it by construction (candles fed in order; brain has no random
-      access), but a stricter `BacktestBus` type would prevent future
-      regressions.
-- [ ] Parquet candle loader. CSV covers the common research case;
-      Parquet waits for the first user who actually needs it.
-- [ ] Book-walk slippage (needs an order-book replay, not just candles).
-- [ ] Expectancy / avg win-loss metrics. Derivable from the trade
-      ledger today; promote to first-class methods when a user asks.
-
-## Phase 5 — Service-integration ergonomics
-
-- [x] `BotHandle` API surface — landed across Phase 2a–2c:
-  - [x] `health() -> BotHealth`
-  - [x] `shutdown()` — fire-and-forget cancellation trigger
-  - [x] `await_shutdown()` — resolves when shutdown is triggered (note:
-        not when fully drained — host awaits the bot's `JoinHandle` for
-        that)
-  - [x] `subscribe_signals() -> broadcast::Receiver<Signal>`
-  - [x] `record_trade_outcome` to feed risk gates from host fill flow
-- [x] Externally-owned `CancellationToken` via
-      `Bot::with_external_cancel(token)` — internal linker, no host
-      glue required.
-- [x] Tokio runtime contract documented in `lib.rs` and
-      `Bot::run_until_shutdown` docs.
-- [x] Tightened `BotConfig` validation: empty symbol list, zero
-      shutdown timeout, NaN loss limit, non-finite margin, zero
-      market/signal bus capacities — all return `Error::Config`. The
-      framework never panics on bad config.
-- [x] Channel capacities configurable: `market_bus_capacity` (default
-      1024) and `signal_bus_capacity` (default 256). Drop-oldest
-      semantics documented on both buses and on `subscribe_signals`.
-- [x] Resource SLAs documented: memory per active symbol, channel
-      buffer sizes, expected shutdown time, restart-after-crash latency
-      bounds.
-
-## Phase 6 — Documentation & release
-
-### Phase 6a — docs + version policy (this batch)
-
-- [x] `#![warn(missing_docs)]` on every public crate. Every public item
-      carries at least a one-line rustdoc. `cargo doc` is clean across
-      `--workspace --no-deps --all-features`.
-- [x] Top-level `docs/quickstart.md` — "Your first rustrade bot in 50
-      lines". Walks through `Brain`, `ExchangeClient`, and `Bot`
-      end-to-end, matching `examples/noop-bot/` line-for-line.
-- [x] Workspace-locked `0.1.x` version policy documented in
-      `CONTRIBUTING.md`, plus the planned publish ordering.
-
-### Phase 6b — extended tutorials + CI (this batch)
-
-- [x] Additional tutorials in `docs/`:
-  - [x] `writing-a-brain.md` — `Brain` trait, state, position
-        handling, the canonical `Mutex<State>` pattern, a worked
-        SMA crossover.
-  - [x] `writing-an-exchange-adapter.md` — `ExchangeClient`,
-        `MarketSource`, `FillSource`, `Capability` introspection,
-        `contract_value`, the cancellation contract.
-  - [x] `embedding.md` — `BotHandle`, external cancellation, signal
-        subscription, runtime + resource expectations.
-  - [x] `backtesting.md` — brain-identical guarantee, position state
-        machine, determinism, intentional non-features.
-- [x] `.github/workflows/ci.yml`: `fmt`, `clippy` (with and without
-      features), `test` matrix (Ubuntu + macOS), `doc` with
-      `-D warnings`, `cargo-deny`.
-- [x] `.github/dependabot.yml`: weekly Cargo + GitHub Actions
-      updates, grouped by `tokio*` / `tracing*`.
-- [x] `deny.toml`: licence allow-list, advisory blocking,
-      registry/git source pinning.
-
-### Phase 6c (this batch)
-
-- [x] `# Example` rustdoc block on every public trait and the major
-      framework structs. Covers `Brain`, `ExchangeClient`, `MarketSource`,
-      `FillSource`, `EventSource`, `CandleSource`, `MetricsSink`,
-      `Clock`, `TradingService`, plus `Bot`, `BotConfig`, `BotHandle`,
-      `Supervisor`, `BackoffConfig`, `PositionSizer`, `Decision`,
-      `Position`, `Order`, `Backtest`, `BacktestConfig`, `SlippageModel`,
-      `FeeModel`. (`CircuitBreaker` and `SessionPnl` already had one.)
-- [x] Coverage with `cargo-llvm-cov` surfaced in PR comments. New
-      `coverage` CI job runs after the test matrix, generates lcov +
-      a text summary, posts a sticky PR comment via
-      `marocchino/sticky-pull-request-comment`, and uploads the lcov
-      file as a 14-day artefact.
-
-### Phase 6c — deferred
-
-- [ ] `cargo publish` driver + `cargo-semver-checks` in CI. Wait
-      until the first crates.io release to design the workflow against
-      a real target.
-- [ ] Consider migrating to mdbook if the docs grow past ~6 files.
-- [ ] cargo-audit weekly scheduled job (subsumed by `cargo-deny`'s
-      advisory check for now; revisit if we need a separate report
-      pipeline).
-
-## Cross-cutting
-
-- [x] **CI** (`.github/workflows/ci.yml`):
-  - [x] fmt: `cargo fmt --check`
-  - [x] clippy: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-  - [x] test: `cargo test --workspace --all-features`
-  - [x] doc: `cargo doc --workspace --no-deps`
-  - [x] MSRV: pinned to `1.94.1` via `rust-toolchain.toml` + the
-        `cargo test (ubuntu-latest|macos-latest)` matrix using
-        `dtolnay/rust-toolchain@1.94.1`. A separate
-        `cargo test (ubuntu-latest, stable)` job exercises whatever
-        `stable` resolves to today so future-incompat and new-lint
-        regressions surface before downstream users hit them.
-  - [x] Matrix: ubuntu-latest + macos-latest on MSRV; ubuntu-latest on
-        stable. Windows is intentionally skipped until someone needs it.
-- [x] `cargo-deny` for licence + duplicate-dep policy.
-- [x] Coverage with `cargo-llvm-cov`; sticky PR comment via
-      `marocchino/sticky-pull-request-comment`.
-- [x] Dependabot for Cargo + GitHub Actions (with
-      `dtolnay/rust-toolchain` on the ignore list — its ref encodes a
-      Rust version, not an action release).
-- [ ] `cargo-audit` weekly scheduled job. Subsumed by `cargo-deny`'s
-      advisory check today; revisit when we need a separate report
-      pipeline.
+The four original open design decisions (leverage, stop orders, contract
+multipliers, parameter overrides) are all resolved in code — see the
+**Resolved design decisions** section near the bottom.
 
 ---
 
-## Open design decisions
+# Roadmap
 
-Lifted from [`NEXT_STEPS.md §"Things to explicitly decide"`](./NEXT_STEPS.md).
+Milestones below are **dependency order, not a calendar**. The active focus is
+0.2 (live-trading hardening); the rest is captured so nothing is lost.
 
-- [x] **Leverage on orders.** Resolved: per-adapter via constructor. No
-      change to `Order`.
-- [x] **Stop orders.** Resolved: `Order.stop: Option<StopAttachment>` —
-      adapters interpret, framework treats as opaque. Gated by
-      `Capability::StopOrders`.
-- [x] **Contract multipliers.** Resolved: `ExchangeClient::contract_value(&Symbol)
-      -> f64` with a `1.0` default. The sizer continues to take an explicit
-      `contract_value` argument for now — wiring the adapter through is
-      the facade's job (Phase 2).
-- [x] **Parameter overrides.** Resolved: option (a) + (c) — each
-      subsystem owns its own config struct (`SizingConfig`,
-      `SessionPnlConfig`, `CircuitBreakerConfig` etc., bundled into
-      `RiskConfig` on `BotConfig`), and brain-specific strategy params
-      stay entirely opaque to the framework. Downstream Optuna-style
-      tuners can swap individual subsystem configs without touching the
-      others, and brain authors are free to load their own params via
-      whatever mechanism they prefer (env, JSON, custom builder).
+## 0.1.1 — cut the patch release (½ day)
+
+The `[Unreleased]` block in `CHANGELOG.md:10` already holds real, shipped
+hardening (resilience tiers). Stamp it so downstream git-dep users can pin it.
+
+- [ ] Promote `CHANGELOG.md` `[Unreleased]` → `[0.1.1]` with the date; open a
+      fresh `[Unreleased]`.
+- [ ] Bump `workspace.package.version` to `0.1.1` (`Cargo.toml:54`) and the
+      internal path-dep versions (`Cargo.toml:93-97`).
+- [ ] Tag `v0.1.1`; update the README status line (`README.md:8-11`) test/
+      coverage counts to match.
+- [ ] Document the MSRV-install caveat seen in CI/containers (the `1.94.1`
+      toolchain can fail a component re-sync; `stable` is the fallback) in
+      `CONTRIBUTING.md`.
+
+## 0.2 — Live-trading hardening  ◀ NEXT UP
+
+The gap between "passes tests" and "safe to run real money." Each track is
+independently reviewable. Together they close the production holes and unblock
+porting a real strategy (e.g. the kucoin SAR bot) on top of the facade.
+
+### 0.2a — Persistence (`StateStore`)
+
+A crash mid-session currently resets `SessionPnl` + `CircuitBreaker`, so the
+daily drawdown cap and loss-streak breaker are **forgotten on restart** —
+the single biggest production risk hole.
+
+- [ ] `StateStore` trait in `rustrade-core` (async, object-safe): `load`,
+      `save`, `flush`. Keyed by `(bot_name, symbol)`. Versioned, serde-backed
+      snapshots so the schema can evolve.
+- [ ] Snapshot/restore for `SessionPnl` (`crates/rustrade-risk/src/session_pnl.rs`)
+      and `CircuitBreaker` (`crates/rustrade-risk/src/circuit_breaker.rs`):
+      `to_snapshot()` / `from_snapshot()` that round-trip realised PnL, the
+      sliding loss window, cooldown deadline, and the UTC session date.
+- [ ] `InMemoryStore` (default, current behaviour) + one durable impl —
+      `JsonFileStore` first (no new heavy deps); sqlite behind a feature flag
+      as a follow-up.
+- [ ] Wire into `Bot`: `Bot::with_state_store(Arc<dyn StateStore>)`. Restore
+      per-symbol risk on `run_until_shutdown` startup (alongside the existing
+      `prefetch_positions`); persist on every `record_close` and on graceful
+      shutdown. Define the **stale-snapshot policy** (e.g. ignore a snapshot
+      whose session date != today so a day-old breaker doesn't wrongly halt).
+- [ ] Integration test: boot → trip breaker → drop bot → re-boot with the same
+      store → breaker is still tripped and session PnL is preserved.
+
+### 0.2b — Rich order intents (stops, limits, TIF)
+
+`Decision` already carries `stop_price` / `take_profit_price`
+(`crates/rustrade-core/src/brain.rs:88-91`) but `ExecutionService::build_order`
+(`crates/rustrade/src/execution.rs:188-240`) **ignores them** and always emits
+a bare `Order::market(...)` (`:233`). Protective stops are half-wired; limit
+entries can't be expressed at all.
+
+- [ ] Honour `decision.stop_price` / `take_profit_price`: attach a
+      `StopAttachment` (`crates/rustrade-core/src/types.rs:168`) to the entry
+      order, or place a paired reduce-only protective order, when the adapter
+      advertises `Capability::StopOrders` (`exchange.rs:25`). When it does not,
+      log + skip the attachment (never silently drop without a trace).
+- [ ] Express **order kind + limit price** from a brain. Add an
+      `OrderKind`/`limit_price` (or a small `OrderIntent`) to `Decision` so a
+      brain can request `Limit` / `PostOnly` / `Ioc` / `Fok`
+      (`OrderKind` already exists, `types.rs:129`). Execution builds the right
+      `Order` and sizes it consistently with the market path.
+- [ ] Decide market-vs-limit default and document it; keep `Decision::buy/sell`
+      defaulting to market so existing brains are unaffected.
+- [ ] Mirror the new order kinds in the backtest fill model (links to 0.4a) so
+      a stop/limit brain backtests the same way it trades live.
+
+### 0.2c — Order lifecycle & reconciliation
+
+`place_order` returns an id that is then forgotten
+(`crates/rustrade/src/execution.rs:163-184`). No resting-order tracking, no
+cancel-on-timeout, no reconnect reconciliation — fine for market-only, required
+once 0.2b lands limit orders.
+
+- [ ] Extend `ExchangeClient` (`crates/rustrade-core/src/exchange.rs:104`):
+      `get_open_orders(&Symbol) -> Vec<OpenOrder>` and
+      `cancel_order(&Symbol, order_id)`, both with conservative defaults so
+      existing adapters keep compiling.
+- [ ] `OrderTracker` in the facade: remember submitted client_ids, expose them
+      on `BotHealth`, and cancel unfilled limit orders after a configurable
+      TTL.
+- [ ] Reconnect reconciliation: on `MarketFeedService` / `FillRoutingService`
+      restart, reconcile tracked orders + cached position against the exchange
+      so a missed fill during a gap doesn't desync risk state.
+
+### 0.2d — Per-symbol risk + multi-brain safety
+
+- [ ] Per-symbol `RiskConfig` overrides. Today `build_risk_state`
+      (`crates/rustrade/src/risk_state.rs:58`) clones one config across every
+      symbol; let `BotConfig` carry per-symbol overrides (different vol → different
+      drawdown cap / breaker thresholds) layered over a default.
+- [ ] Multi-brain-per-symbol arbitration. Each brain gets its own
+      `ExecutionService` (`execution.rs:50`); two brains trading the same symbol
+      can place opposing orders and fight over one position. Either add a netting/
+      arbitration layer keyed by symbol, or add a startup guard that rejects
+      overlapping `(brain, symbol)` ownership — and document the chosen model.
+- [ ] Document the position-cache staleness window (`risk_state.rs:48-54`):
+      between fills, execution reads a possibly-stale position; add an optional
+      periodic refresh for adapters without a private fill feed.
+
+## 0.3 — Reference adapter + crates.io publish
+
+Make the framework provable end-to-end and installable.
+
+### 0.3a — Simulated / paper-trading reference adapter
+
+Every end-to-end path today is exercised only through mocks. A sim adapter
+proves the trait surface, gives new users a runnable starting point, and
+enables paper trading — all without binding to a real venue.
+
+- [ ] `SimulatedExchange` implementing `ExchangeClient` + `FillSource`:
+      in-memory matching against the live `MarketDataBus` (fill market orders
+      at the next tick, rest limit orders until crossed), configurable
+      slippage/fees reusing the `rustrade-backtest` models, synthetic position
+      + balance accounting.
+- [ ] Honour `Capability` truthfully (advertise `StopOrders`, `ReduceOnly`,
+      `PrivateFeed`) so it exercises the 0.2b/0.2c paths.
+- [ ] `examples/paper-trading-bot/` wiring a real brain to the sim adapter for
+      a self-contained, fills-and-all demo (the current examples stop at
+      mocks).
+
+### 0.3b — Release engineering
+
+Deferred from Phase 6c — design against a real publish target now.
+
+- [ ] `cargo publish` driver: publish in dependency order (core → supervisor →
+      risk → backtest → rustrade), gated on a clean tag.
+- [ ] `cargo-semver-checks` in CI to catch accidental breaking changes to the
+      public ABI before they ship.
+- [ ] Release workflow (`.github/workflows/release.yml`): on tag, verify,
+      publish, attach `CHANGELOG` notes.
+- [ ] Update README install instructions from git-dep to `cargo add rustrade`
+      once live.
+
+## 0.4 — Backtest & research depth
+
+Pull the deferred Phase 4 items forward and add a research loop.
+
+### 0.4a — Fill realism
+
+- [ ] Limit-order fills in the engine. `engine.rs:183-188` fills every order as
+      a taker at candle close; model resting limit fills (filled when the
+      candle's high/low crosses the limit) so 0.2b limit brains backtest
+      faithfully.
+- [ ] Funding-rate model for perpetuals — periodic funding cashflows on open
+      positions, configurable schedule. Materially affects perp PnL and is
+      modelled nowhere today (live or backtest).
+- [ ] Book-walk slippage (`SlippageModel`) — needs an order-book replay, not
+      just candles; gate behind an optional book-data input.
+- [ ] `BacktestBus` type that makes the zero-lookahead invariant structural
+      (the engine guarantees it by construction today; a type would prevent
+      future regressions).
+
+### 0.4b — Research ergonomics
+
+- [ ] Parquet candle loader alongside `load_csv` (`crates/rustrade-backtest/src/loaders.rs`).
+- [ ] Walk-forward / parameter-sweep harness: run a brain factory across a grid
+      or date windows, collect `BacktestResult`s, aggregate. Enables Optuna-style
+      tuning the design already anticipates.
+- [ ] Expectancy / avg-win / avg-loss + portfolio-level metrics on
+      `BacktestResult` (`crates/rustrade-backtest/src/result.rs`) — derivable
+      from the ledger today; promote to first-class.
+- [ ] Trade-ledger + equity-curve export (CSV/JSON) and an optional HTML/plot
+      report for eyeballing a run.
+
+## 0.5 — Observability & ops
+
+`MetricsSink` (`crates/rustrade-core/src/metrics.rs`) exists; the supervisor
+has feature-gated Prometheus. Close the loop to a real backend.
+
+- [ ] `rustrade-prometheus` crate (or facade feature): a `MetricsSink` impl
+      that registers/serves the counters/histograms the framework already
+      emits (`rustrade_fills_routed_total`, `rustrade_candles_published_total`,
+      `rustrade_realised_pnl_quote`, …).
+- [ ] `examples/observable-bot/` exporting metrics to a scrape endpoint +
+      surfacing `BotHealth` over HTTP (a host-owned `/health`).
+- [ ] Optional OpenTelemetry tracing layer alongside `logging::init_tracing`.
+- [ ] `criterion` benchmarks for hot paths: backtest throughput
+      (candles/sec) and `MarketDataBus` fan-out, to catch perf regressions.
+- [ ] Coverage threshold gate in CI (warn/fail under N% line coverage).
+- [ ] `cargo-audit` weekly scheduled job (currently subsumed by `cargo-deny`'s
+      advisory check; split out if a separate report pipeline is wanted).
+
+## Backlog / 1.0+
+
+Bigger bets, deliberately deferred. Listed so contributors don't build them by
+accident — revisit when there's a concrete pull.
+
+- [ ] HTTP/gRPC control plane around `BotHandle` (start/stop/params/health) —
+      likely a downstream crate, not core.
+- [ ] Strategy ensemble / brain composer (an outer `Brain` that blends inner
+      brains' decisions) — the trait already allows it; ship a reference impl.
+- [ ] Live + replay hybrid: warm-start a brain's indicators from history before
+      it goes live.
+- [ ] Multi-account / sub-account routing.
+- [ ] Built-in indicator library — stays a separate crate (`indicators-ta`);
+      `rustrade` only defines the `Brain` that consumes them.
+- [ ] Web dashboard.
+- [ ] Migrate `docs/` to mdbook if it grows past ~6 files.
 
 ---
 
-## Explicitly out of scope for 0.1
+## Open design decisions for 0.2
 
-Listed so contributors don't accidentally build them. Revisit for 0.2+:
+Answer these in code, not docs, as each track lands.
 
-- Persistence (`StateStore` trait, sqlite/postgres impls)
-- HTTP/gRPC/IPC control plane
-- Built-in exchange adapters
-- Built-in indicator library
-- Strategy ensemble / brain composer
-- Order-book reconstruction
-- Live + replay hybrid (warm-start brains from history)
-- Multi-account / sub-account routing
-- Web dashboard
+- [ ] **StateStore granularity.** One snapshot per `(bot, symbol)`, or one
+      per bot? Per-symbol is more parallel and matches `SymbolRisk`; per-bot is
+      simpler to make atomic. (Leaning per-symbol.)
+- [ ] **Stop semantics.** Does an honoured `decision.stop_price` become a
+      native exchange stop (`Order.stop`), or a framework-managed reduce-only
+      order the `OrderTracker` watches? Native is simpler but depends on adapter
+      `Capability::StopOrders`; framework-managed works everywhere but adds a
+      monitoring loop.
+- [ ] **Order intent shape.** Extend `Decision` with `kind`/`limit_price`
+      fields, or introduce a separate `OrderIntent` the brain returns? Adding
+      fields keeps the one-trait simplicity; a struct is cleaner if intents
+      grow (brackets, OCO).
+- [ ] **Reconciliation source of truth.** On reconnect, trust the exchange's
+      position/orders wholesale, or diff against tracked state and alert on
+      mismatch? (Leaning trust-exchange + warn-on-diff.)
+
+## Resolved design decisions (0.1)
+
+Kept for the record — see `NEXT_STEPS.md §"Things to explicitly decide"`.
+
+- [x] **Leverage on orders** — per-adapter via constructor; no `Order` change.
+- [x] **Stop orders** — `Order.stop: Option<StopAttachment>`, adapter-interpreted,
+      gated by `Capability::StopOrders`. *(Wiring brain→order lands in 0.2b.)*
+- [x] **Contract multipliers** — `ExchangeClient::contract_value(&Symbol) -> f64`,
+      default `1.0`.
+- [x] **Parameter overrides** — each subsystem owns its config
+      (`SizingConfig`/`SessionPnlConfig`/`CircuitBreakerConfig` → `RiskConfig`);
+      brain strategy params stay opaque to the framework.
 
 ---
 
 ## How to use this file
 
-- Tick boxes as work lands. Reference the PR that closed each item in
-  `CHANGELOG.md`, not here.
-- When adding a new item: pick the right phase, keep it actionable
-  ("add `Symbol` newtype" not "improve types"), and link the relevant
-  source file with `file:line` when the item is a concrete code change.
-- Phase order is a dependency order, not a calendar. Phase 4 can start
-  early in parallel if someone wants to — but Phase 2 cannot start before
-  Phase 1's supervisor port.
+- Tick boxes as work lands. Reference the closing PR in `CHANGELOG.md`, not here.
+- New items: pick the right milestone, keep them actionable ("honour
+  `decision.stop_price` in `build_order`" not "improve execution"), and link
+  the source with `file:line` when it's a concrete code change.
+- Milestone order is a dependency order. 0.2 tracks (a–d) are mostly parallel;
+  0.2c (lifecycle) builds on 0.2b (limit orders).
