@@ -8,10 +8,12 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::market::{MarketDataEvent, Symbol};
-use crate::types::{Candle, Fill, Order, Position};
+use crate::market::{MarketDataEvent, Side, Symbol};
+use crate::types::{Candle, Fill, Order, OrderKind, Position, Price, Volume};
 
 /// Optional adapter capabilities, queried via [`ExchangeClient::supports`].
 ///
@@ -38,10 +40,15 @@ pub enum Capability {
     PublicFeed,
     /// Adapter pushes fill / order-update events on a private feed.
     PrivateFeed,
+    /// Adapter implements [`ExchangeClient::get_open_orders`] and
+    /// [`ExchangeClient::cancel_order`] — required for resting-order
+    /// tracking, TTL cancellation, and reconnect reconciliation.
+    OrderTracking,
 }
 
 /// Status of an order as reported by the exchange.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
     /// Submitted, not yet on the book.
     Pending,
@@ -55,6 +62,52 @@ pub enum OrderStatus {
     Cancelled,
     /// Rejected by the exchange.
     Rejected,
+}
+
+impl OrderStatus {
+    /// `true` while the order may still rest on the book and consume margin
+    /// — i.e. it is not in a terminal state. The order-tracking layer keeps
+    /// watching these and drops the rest.
+    pub fn is_live(self) -> bool {
+        matches!(
+            self,
+            OrderStatus::Pending | OrderStatus::Open | OrderStatus::PartiallyFilled
+        )
+    }
+}
+
+/// A resting (not-yet-terminal) order as reported by the exchange, returned
+/// by [`ExchangeClient::get_open_orders`].
+///
+/// This is the exchange's view of an order the bot previously placed — used
+/// by the framework's order-tracking layer to age out stale resting orders
+/// and to reconcile tracked state after a reconnect.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenOrder {
+    /// Exchange-assigned order id (matches the id returned by
+    /// [`ExchangeClient::place_order`]).
+    pub order_id: String,
+    /// Client-supplied id echoed back by the exchange, if any.
+    pub client_id: Option<String>,
+    /// Symbol the order is for.
+    pub symbol: Symbol,
+    /// Side of the resting order.
+    pub side: Side,
+    /// Order kind (limit / post-only / …). Market orders never rest, so a
+    /// well-behaved adapter won't report them here.
+    pub kind: OrderKind,
+    /// Limit price, if the order kind carries one.
+    pub limit_price: Option<Price>,
+    /// Original order quantity.
+    pub size: Volume,
+    /// Quantity filled so far (`0` for an untouched resting order).
+    pub filled: Volume,
+    /// Current status as reported by the exchange.
+    pub status: OrderStatus,
+    /// When the order was created at the exchange, if known. Used by the
+    /// tracker's TTL logic; `None` falls back to the time the bot first
+    /// observed the order.
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// What the bot framework needs from an exchange to trade.
@@ -143,6 +196,32 @@ pub trait ExchangeClient: Send + Sync + 'static {
     /// adapters override.
     fn contract_value(&self, _symbol: &Symbol) -> f64 {
         1.0
+    }
+
+    /// List the currently-resting (non-terminal) orders for a symbol.
+    ///
+    /// Used by the framework's order-tracking layer to age out stale limit
+    /// orders and to reconcile after a reconnect. The default returns an
+    /// empty list — an adapter that doesn't advertise
+    /// [`Capability::OrderTracking`] is assumed to have no resting orders
+    /// the framework should manage (e.g. a market-only or fire-and-forget
+    /// adapter). Adapters that support resting orders **must** override this
+    /// and advertise the capability.
+    async fn get_open_orders(&self, _symbol: &Symbol) -> Result<Vec<OpenOrder>> {
+        Ok(Vec::new())
+    }
+
+    /// Cancel a single resting order by its exchange-assigned id.
+    ///
+    /// Returns `Ok(true)` if the order was cancelled, `Ok(false)` if it was
+    /// already gone (filled or cancelled) — a benign no-op the caller can
+    /// ignore. The default errors, so the tracking layer never believes it
+    /// cancelled an order against an adapter that can't actually do so;
+    /// adapters advertising [`Capability::OrderTracking`] override it.
+    async fn cancel_order(&self, _symbol: &Symbol, _order_id: &str) -> Result<bool> {
+        Err(crate::Error::exchange(
+            "cancel_order not supported by this adapter (no Capability::OrderTracking)",
+        ))
     }
 }
 
@@ -323,4 +402,88 @@ pub trait CandleSource: Send + Sync + 'static {
     /// chronological order (oldest first). If the exchange's native
     /// endpoint returns newest-first, sort before returning.
     async fn poll(&self, symbol: &Symbol, interval: Duration, limit: usize) -> Result<Vec<Candle>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Price, Volume};
+
+    #[test]
+    fn order_status_is_live_only_for_non_terminal() {
+        assert!(OrderStatus::Pending.is_live());
+        assert!(OrderStatus::Open.is_live());
+        assert!(OrderStatus::PartiallyFilled.is_live());
+        assert!(!OrderStatus::Filled.is_live());
+        assert!(!OrderStatus::Cancelled.is_live());
+        assert!(!OrderStatus::Rejected.is_live());
+    }
+
+    #[test]
+    fn open_order_serde_roundtrip() {
+        let o = OpenOrder {
+            order_id: "ex-1".into(),
+            client_id: Some("cli-1".into()),
+            symbol: Symbol::from("BTCUSDT"),
+            side: Side::Buy,
+            kind: OrderKind::Limit,
+            limit_price: Some(Price(100.0)),
+            size: Volume(2.0),
+            filled: Volume(0.5),
+            status: OrderStatus::PartiallyFilled,
+            created_at: None,
+        };
+        let json = serde_json::to_string(&o).unwrap();
+        let back: OpenOrder = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, o);
+    }
+
+    #[test]
+    fn order_status_serde_is_snake_case() {
+        let json = serde_json::to_string(&OrderStatus::PartiallyFilled).unwrap();
+        assert_eq!(json, "\"partially_filled\"");
+    }
+
+    // A default adapter (no OrderTracking) reports no open orders and
+    // refuses to cancel — proving the conservative defaults.
+    struct DefaultAdapter;
+    #[async_trait]
+    impl ExchangeClient for DefaultAdapter {
+        fn name(&self) -> &str {
+            "default"
+        }
+        async fn place_order(&self, _o: &Order) -> Result<String> {
+            Ok("id".into())
+        }
+        async fn cancel_all(&self, _s: &Symbol) -> Result<usize> {
+            Ok(0)
+        }
+        async fn close_position(&self, _s: &Symbol, _p: &Position) -> Result<String> {
+            Ok("c".into())
+        }
+        async fn get_position(&self, _s: &Symbol) -> Result<Position> {
+            Ok(Position::FLAT)
+        }
+        async fn get_balance(&self, _c: &str) -> Result<f64> {
+            Ok(0.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn default_get_open_orders_is_empty() {
+        let a = DefaultAdapter;
+        assert!(
+            a.get_open_orders(&Symbol::from("X"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!a.supports(Capability::OrderTracking));
+    }
+
+    #[tokio::test]
+    async fn default_cancel_order_errors() {
+        let a = DefaultAdapter;
+        assert!(a.cancel_order(&Symbol::from("X"), "id").await.is_err());
+    }
 }

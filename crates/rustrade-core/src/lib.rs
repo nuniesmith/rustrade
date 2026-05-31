@@ -48,7 +48,8 @@ pub use brain::{Brain, BrainHealth, Decision, SizeHint};
 pub use bus::{MarketDataBus, SignalBus};
 pub use error::{Error, Result};
 pub use exchange::{
-    CandleSource, Capability, EventSource, ExchangeClient, FillSource, MarketSource, OrderStatus,
+    CandleSource, Capability, EventSource, ExchangeClient, FillSource, MarketSource, OpenOrder,
+    OrderStatus,
 };
 pub use market::{Exchange, MarketDataEvent, Side, Symbol};
 pub use metrics::{MetricsSink, NoopSink};
