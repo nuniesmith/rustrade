@@ -84,6 +84,10 @@ pub struct ExecutionService {
     name: String,
     brain: Arc<dyn Brain>,
     ctx: ExecutionContext,
+    /// Symbols this brain owns (`Brain::owned_symbols`), cached at
+    /// construction. `None` ⇒ the brain sees every symbol; `Some` ⇒ events
+    /// for other symbols are skipped before `on_event`.
+    owned: Option<std::collections::HashSet<Symbol>>,
     events_processed: AtomicU64,
     events_dropped: AtomicU64,
     orders_placed: AtomicU64,
@@ -93,10 +97,14 @@ pub struct ExecutionService {
 impl ExecutionService {
     pub(crate) fn new(brain: Arc<dyn Brain>, ctx: ExecutionContext) -> Self {
         let name = format!("execution[{}]", brain.name());
+        let owned = brain
+            .owned_symbols()
+            .map(|syms| syms.into_iter().collect::<std::collections::HashSet<_>>());
         Self {
             name,
             brain,
             ctx,
+            owned,
             events_processed: AtomicU64::new(0),
             events_dropped: AtomicU64::new(0),
             orders_placed: AtomicU64::new(0),
@@ -133,6 +141,16 @@ impl ExecutionService {
 
     async fn handle_event(&self, event: &MarketDataEvent) -> anyhow::Result<()> {
         let symbol = event.symbol().clone();
+
+        // Ownership filter: a brain that declared `owned_symbols` only ever
+        // sees its own symbols — others are dropped before `on_event`, so
+        // two brains can't both act on one symbol (also enforced at startup).
+        if let Some(owned) = &self.owned
+            && !owned.contains(&symbol)
+        {
+            return Ok(());
+        }
+
         let position = self.position_for(&symbol).await;
 
         let decision = self.brain.on_event(event, &position).await?;
