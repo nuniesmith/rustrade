@@ -160,7 +160,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "rustrade",
+ "rustrade-framework",
  "tokio",
  "tokio-util",
  "tracing",
@@ -427,7 +427,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "rustrade",
+ "rustrade-framework",
  "tokio",
  "tracing",
 ]
@@ -438,7 +438,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "rustrade",
+ "rustrade-framework",
  "tokio",
  "tracing",
 ]
@@ -700,25 +700,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustrade"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "rustrade-core",
- "rustrade-risk",
- "rustrade-supervisor",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rustrade-backtest"
 version = "0.2.0"
 dependencies = [
@@ -745,6 +726,25 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rustrade-framework"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "rustrade-core",
+ "rustrade-risk",
+ "rustrade-supervisor",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -890,7 +890,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "rustrade",
+ "rustrade-framework",
  "tokio",
  "tracing",
 ]

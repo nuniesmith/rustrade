@@ -5,10 +5,14 @@ service lifecycle, supervision, risk primitives, buses, traits — that every
 trading bot rewrites from scratch. Plug in your own exchange adapter,
 indicator stack, and strategy (`Brain`) and you get a production-ready bot.
 
-> **Status: 0.1.0.** All five crates are complete and tested — core,
-> supervisor, risk, backtest, and the `rustrade` facade. CI is green on
-> Linux + macOS across MSRV (1.94.1) and stable, with ~91% line coverage.
-> Not yet published to crates.io; depend on it via a git dependency for now.
+> **Status: 0.2.0, published on crates.io.** All five crates are complete
+> and tested — core, supervisor, risk, backtest, and the facade. CI is green
+> on Linux + macOS across MSRV (1.94.1) and stable, with ~91% line coverage.
+>
+> The facade is published as **`rustrade-framework`** (the bare `rustrade`
+> name on crates.io belongs to an unrelated project) but is still imported
+> as `rustrade` — add `rustrade-framework = "0.2"` to your `Cargo.toml` and
+> write `use rustrade::{Bot, BotConfig};` as usual.
 
 ---
 
