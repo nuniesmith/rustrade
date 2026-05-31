@@ -136,22 +136,59 @@ for crate in "${PUBLISH_ORDER[@]}"; do
 done
 
 # ── Commit, tag, push ─────────────────────────────────────────────────────────
+# Idempotent: if Cargo.toml was already at the target version (e.g. the bump
+# landed via a prior PR, or this is a re-run after a mid-publish failure),
+# there's nothing to commit — skip the commit instead of letting `set -e`
+# abort the whole release before the tag/publish steps.
 run git add "$CARGO"
-run git commit -m "chore: release ${NEW_VERSION}"
-run git tag -a "$NEW_TAG" -m "Release ${NEW_TAG}"
+if $DRY_RUN; then
+    echo "[dry-run] git commit -m \"chore: release ${NEW_VERSION}\" (if changed)"
+elif git diff --cached --quiet; then
+    echo "==> Cargo.toml already at ${NEW_VERSION} — nothing to commit, continuing"
+else
+    git commit -m "chore: release ${NEW_VERSION}"
+fi
+
+# Tag only if it doesn't already exist (re-run safe).
+if $DRY_RUN; then
+    echo "[dry-run] git tag -a $NEW_TAG -m \"Release ${NEW_TAG}\""
+elif git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+    echo "==> Tag $NEW_TAG already exists — reusing it"
+else
+    git tag -a "$NEW_TAG" -m "Release ${NEW_TAG}"
+fi
+
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 echo "==> Pushing '$BRANCH' and tag '$NEW_TAG'"
 run git push origin "$BRANCH"
 run git push origin "$NEW_TAG"
 
 # ── Publish in dependency order ───────────────────────────────────────────────
+# Re-run safe: a crate already on crates.io at this version is skipped (the
+# "already uploaded" error is non-fatal here), so a publish that died partway
+# can be resumed by simply re-running the script.
 echo "==> Publishing to crates.io in dependency order"
 for crate in "${PUBLISH_ORDER[@]}"; do
     echo "    -- publishing $crate"
-    run cargo publish -p "$crate"
+    if $DRY_RUN; then
+        echo "[dry-run] cargo publish -p $crate"
+        continue
+    fi
+    if cargo publish -p "$crate"; then
+        :
+    else
+        # Tolerate "crate version is already uploaded" on re-runs; fail on
+        # anything else.
+        if cargo search "$crate" 2>/dev/null | grep -q "^$crate = \"${NEW_VERSION}\""; then
+            echo "       $crate ${NEW_VERSION} already on crates.io — skipping"
+        else
+            echo "ERROR: publishing $crate failed (see output above)"
+            exit 1
+        fi
+    fi
     # crates.io needs a moment to index a new crate before a dependent of it
-    # can be published. Skip the wait on the last crate and in dry runs.
-    if ! $DRY_RUN && [[ "$crate" != "${PUBLISH_ORDER[-1]}" ]]; then
+    # can be published. Skip the wait on the last crate.
+    if [[ "$crate" != "${PUBLISH_ORDER[-1]}" ]]; then
         echo "       waiting for the index to update…"
         sleep 20
     fi
