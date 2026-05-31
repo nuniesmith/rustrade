@@ -299,6 +299,26 @@ pub trait Brain: Send + Sync + 'static {
     /// Human-readable identifier used in logs and metrics.
     fn name(&self) -> &str;
 
+    /// Symbols this brain exclusively owns, or `None` to see every symbol.
+    ///
+    /// This is the multi-brain arbitration contract:
+    ///
+    /// - **`None` (default):** the brain receives events for *all* configured
+    ///   symbols and is responsible for its own filtering. Multiple `None`
+    ///   brains may run together — the framework does not guard against them
+    ///   acting on the same symbol, so they must coordinate themselves.
+    /// - **`Some(symbols)`:** the framework routes *only* those symbols'
+    ///   events to this brain (others are skipped before `on_event`), and
+    ///   **rejects at startup** any configuration where two brains claim the
+    ///   same symbol — preventing two strategies from fighting over one
+    ///   position. A brain that owns its symbols needn't filter internally.
+    ///
+    /// Must be cheap and deterministic — it's read once at startup for the
+    /// overlap check and cached per execution loop.
+    fn owned_symbols(&self) -> Option<Vec<Symbol>> {
+        None
+    }
+
     /// Core decision point — called on every market event for any symbol
     /// this brain cares about.
     ///

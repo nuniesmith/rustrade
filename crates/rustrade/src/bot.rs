@@ -402,6 +402,26 @@ impl Bot {
             ));
         }
 
+        // Multi-brain arbitration guard: no two brains may claim ownership of
+        // the same symbol via `Brain::owned_symbols` — that would let two
+        // strategies fight over one position. Brains returning `None` opt out
+        // and self-coordinate (current behaviour).
+        let mut claimed: HashMap<Symbol, String> = HashMap::new();
+        for brain in &brains {
+            let Some(syms) = brain.owned_symbols() else {
+                continue;
+            };
+            for sym in syms.into_iter().collect::<std::collections::HashSet<_>>() {
+                if let Some(other) = claimed.insert(sym.clone(), brain.name().to_string()) {
+                    return Err(Error::config(format!(
+                        "brains '{other}' and '{}' both declare ownership of {sym} — \
+                         overlapping owned_symbols would fight over one position",
+                        brain.name()
+                    )));
+                }
+            }
+        }
+
         let supervisor = Arc::new(Supervisor::new(
             SupervisorConfig::default()
                 .with_shutdown_timeout(config.shutdown_timeout)
@@ -873,6 +893,29 @@ mod tests {
         }
     }
 
+    /// Brain that declares ownership of a fixed symbol set, for the
+    /// multi-brain arbitration guard tests.
+    struct OwningBrain {
+        name: &'static str,
+        owns: Vec<Symbol>,
+    }
+    #[async_trait]
+    impl Brain for OwningBrain {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn owned_symbols(&self) -> Option<Vec<Symbol>> {
+            Some(self.owns.clone())
+        }
+        async fn on_event(
+            &self,
+            _e: &MarketDataEvent,
+            _p: &Position,
+        ) -> Result<rustrade_core::Decision> {
+            Ok(rustrade_core::Decision::hold())
+        }
+    }
+
     struct NoopExchange;
     #[async_trait]
     impl ExchangeClient for NoopExchange {
@@ -1089,6 +1132,63 @@ mod tests {
         assert_eq!(bot.config().name, "test");
         let h2 = handle.clone();
         assert!(!h2.is_shutting_down());
+    }
+
+    #[tokio::test]
+    async fn rejects_overlapping_owned_symbols() {
+        // Two brains both claim BTCUSDT → config error.
+        let cfg = BotConfig::builder()
+            .name("x")
+            .symbols(["BTCUSDT", "ETHUSDT"])
+            .without_signal_handler()
+            .build()
+            .unwrap();
+        let a = Arc::new(OwningBrain {
+            name: "a",
+            owns: vec![Symbol::from("BTCUSDT")],
+        });
+        let b = Arc::new(OwningBrain {
+            name: "b",
+            owns: vec![Symbol::from("BTCUSDT"), Symbol::from("ETHUSDT")],
+        });
+        assert!(
+            matches!(
+                Bot::new(cfg, Arc::new(NoopExchange), vec![a, b]),
+                Err(Error::Config(_))
+            ),
+            "overlapping owned_symbols must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_disjoint_owned_symbols() {
+        // Disjoint ownership is fine.
+        let cfg = BotConfig::builder()
+            .name("x")
+            .symbols(["BTCUSDT", "ETHUSDT"])
+            .without_signal_handler()
+            .build()
+            .unwrap();
+        let a = Arc::new(OwningBrain {
+            name: "a",
+            owns: vec![Symbol::from("BTCUSDT")],
+        });
+        let b = Arc::new(OwningBrain {
+            name: "b",
+            owns: vec![Symbol::from("ETHUSDT")],
+        });
+        assert!(Bot::new(cfg, Arc::new(NoopExchange), vec![a, b]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn none_owners_are_not_guarded() {
+        // Two `None` (catch-all) brains coexist — they opt out of the guard.
+        let bot = Bot::new(
+            cfg(),
+            Arc::new(NoopExchange),
+            vec![Arc::new(NoopBrain), Arc::new(NoopBrain)],
+        );
+        assert!(bot.is_ok());
     }
 
     #[allow(dead_code)]
