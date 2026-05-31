@@ -124,10 +124,11 @@ pub struct Candle {
 // ── Orders and fills ─────────────────────────────────────────────────────────
 
 /// Order kind (market vs limit and their time-in-force variants).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderKind {
     /// Market order — fill immediately at the best available price.
+    #[default]
     Market,
     /// Standard limit order — rest on the book until filled or cancelled.
     Limit,

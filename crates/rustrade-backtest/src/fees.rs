@@ -30,8 +30,9 @@ pub enum FeeModel {
     /// Flat rate applied to every fill, as a fraction of notional.
     /// `0.001` = 10 bps = 0.1%.
     Flat(f64),
-    /// Different rates for maker vs taker fills.
-    /// Phase 4a: every market order is treated as taker.
+    /// Different rates for maker vs taker fills. The engine charges the
+    /// taker rate for market / IOC / FOK orders and closes, and the maker
+    /// rate for limit / post-only orders that rest before filling.
     MakerTaker {
         /// Fraction-of-notional rate when the fill is a maker.
         maker: f64,
