@@ -94,7 +94,7 @@ pub mod services;
 
 pub use bot::{Bot, BotConfig, BotConfigBuilder, RiskConfig};
 pub use handle::{BotHandle, BotHealth, BrainHealthSnapshot};
-pub use order_tracker::{OrderReaperService, OrderTracker, TrackedOrder};
+pub use order_tracker::{OcoRegistry, OrderReaperService, OrderTracker, TrackedOrder};
 pub use services::{CandlePollerService, FillRoutingService, MarketFeedService};
 
 // Re-exports from sub-crates so downstream depends on `rustrade` only.

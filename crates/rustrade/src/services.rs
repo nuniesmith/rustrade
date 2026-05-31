@@ -117,12 +117,15 @@ pub struct FillRoutingService {
     risk: RiskStateMap,
     metrics: Arc<dyn MetricsSink>,
     persister: Option<RiskPersister>,
+    oco: Option<crate::order_tracker::OcoRegistry>,
     fills_routed: AtomicU64,
     refresh_errors: AtomicU64,
     trades_recorded: AtomicU64,
+    oco_cancels: AtomicU64,
 }
 
 impl FillRoutingService {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         source: Arc<dyn FillSource>,
         brains: Arc<Vec<Arc<dyn Brain>>>,
@@ -131,6 +134,7 @@ impl FillRoutingService {
         risk: RiskStateMap,
         metrics: Arc<dyn MetricsSink>,
         persister: Option<RiskPersister>,
+        oco: Option<crate::order_tracker::OcoRegistry>,
     ) -> Self {
         Self {
             source,
@@ -140,10 +144,17 @@ impl FillRoutingService {
             risk,
             metrics,
             persister,
+            oco,
             fills_routed: AtomicU64::new(0),
             refresh_errors: AtomicU64::new(0),
             trades_recorded: AtomicU64::new(0),
+            oco_cancels: AtomicU64::new(0),
         }
+    }
+
+    /// Total OCO siblings cancelled in response to a bracket leg filling.
+    pub fn oco_cancels(&self) -> u64 {
+        self.oco_cancels.load(Ordering::Relaxed)
     }
 
     /// Total fills delivered to brains since service start.
@@ -259,6 +270,21 @@ impl TradingService for FillRoutingService {
                     };
 
                     let symbol = fill.symbol.clone();
+
+                    // OCO: if this fill belongs to a bracket leg, cancel its
+                    // sibling so the position isn't closed twice.
+                    if let Some(oco) = &self.oco
+                        && let Some((sym, sibling)) = oco.take_sibling(&fill.order_id).await
+                    {
+                        match self.exchange.cancel_order(&sym, &sibling).await {
+                            Ok(_) => {
+                                self.oco_cancels.fetch_add(1, Ordering::Relaxed);
+                                self.metrics.inc("rustrade_oco_cancels_total");
+                                tracing::info!(symbol = %sym, filled = %fill.order_id, cancelled = %sibling, "OCO: cancelled sibling after bracket leg filled");
+                            }
+                            Err(e) => tracing::warn!(symbol = %sym, sibling = %sibling, error = %e, "OCO: failed to cancel sibling (it may already be gone)"),
+                        }
+                    }
 
                     // Snapshot the pre-fill position so we can compute
                     // realised PnL before the exchange refreshes the
