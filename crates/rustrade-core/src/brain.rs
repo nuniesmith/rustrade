@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::market::{MarketDataEvent, Symbol};
 use crate::signal::SignalType;
-use crate::types::{Fill, Position, Price, Volume};
+use crate::types::{Fill, OrderKind, Position, Price, Volume};
 
 /// How large the brain wants the next order to be. The risk layer can honour,
 /// scale down, or reject this hint.
@@ -76,6 +76,17 @@ pub enum SizeHint {
 /// assert_eq!(decision.stop_price, Some(Price(95.0)));
 /// assert_eq!(decision.take_profit_price, Some(Price(110.0)));
 /// ```
+///
+/// # Entry order kind
+///
+/// By default an entry executes as a [`OrderKind::Market`] order. A brain
+/// can request a resting or time-in-force variant via
+/// [`Decision::with_limit_price`] (limit) or [`Decision::with_order_kind`]
+/// (post-only / IOC / FOK). The execution layer gates non-trivial kinds on
+/// the adapter's [`Capability`](crate::Capability) — an unsupported kind
+/// blocks the order rather than silently downgrading it (which would change
+/// fill / fee semantics). `Close` decisions always execute as reduce-only
+/// market orders regardless of these fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
     /// What the brain decided to do (Buy / Sell / Hold / Close).
@@ -89,6 +100,16 @@ pub struct Decision {
     pub stop_price: Option<Price>,
     /// Optional suggested take-profit price.
     pub take_profit_price: Option<Price>,
+    /// How the entry order should execute. Defaults to
+    /// [`OrderKind::Market`]. Ignored for `Close` decisions.
+    #[serde(default)]
+    pub order_kind: OrderKind,
+    /// Limit price for non-market entries. Used by
+    /// [`OrderKind::Limit`] / [`OrderKind::PostOnly`] / [`OrderKind::Ioc`]
+    /// / [`OrderKind::Fok`]; if absent for those kinds the execution layer
+    /// falls back to the triggering event's price and logs a warning.
+    #[serde(default)]
+    pub limit_price: Option<Price>,
     /// Free-form brain metadata, used for logging and post-trade analysis.
     #[serde(default)]
     pub metadata: serde_json::Value,
@@ -103,6 +124,8 @@ impl Decision {
             size_hint: SizeHint::Default,
             stop_price: None,
             take_profit_price: None,
+            order_kind: OrderKind::Market,
+            limit_price: None,
             metadata: serde_json::Value::Null,
         }
     }
@@ -149,6 +172,23 @@ impl Decision {
     /// Override the default size hint.
     pub fn with_size_hint(mut self, hint: SizeHint) -> Self {
         self.size_hint = hint;
+        self
+    }
+
+    /// Request a resting limit entry at `price` (sets
+    /// [`Decision::order_kind`] to [`OrderKind::Limit`]).
+    pub fn with_limit_price(mut self, price: Price) -> Self {
+        self.order_kind = OrderKind::Limit;
+        self.limit_price = Some(price);
+        self
+    }
+
+    /// Set the entry order kind explicitly — e.g. [`OrderKind::PostOnly`],
+    /// [`OrderKind::Ioc`], [`OrderKind::Fok`]. For any non-market kind also
+    /// set a limit via [`Self::with_limit_price`] (or the execution layer
+    /// falls back to the event price).
+    pub fn with_order_kind(mut self, kind: OrderKind) -> Self {
+        self.order_kind = kind;
         self
     }
 
@@ -358,6 +398,49 @@ mod tests {
         assert!(matches!(back.signal, SignalType::Sell));
         assert_eq!(back.confidence, 0.6);
         assert_eq!(back.stop_price, Some(Price(120.0)));
+    }
+
+    #[test]
+    fn decision_defaults_to_market() {
+        let d = Decision::buy(1.0);
+        assert!(matches!(d.order_kind, OrderKind::Market));
+        assert!(d.limit_price.is_none());
+    }
+
+    #[test]
+    fn with_limit_price_sets_kind_and_price() {
+        let d = Decision::buy(1.0).with_limit_price(Price(100.0));
+        assert!(matches!(d.order_kind, OrderKind::Limit));
+        assert_eq!(d.limit_price, Some(Price(100.0)));
+    }
+
+    #[test]
+    fn with_order_kind_overrides_kind() {
+        let d = Decision::sell(1.0)
+            .with_limit_price(Price(50.0))
+            .with_order_kind(OrderKind::PostOnly);
+        assert!(matches!(d.order_kind, OrderKind::PostOnly));
+        assert_eq!(d.limit_price, Some(Price(50.0)));
+    }
+
+    #[test]
+    fn decision_serde_roundtrip_with_order_kind() {
+        let d = Decision::buy(0.5).with_order_kind(OrderKind::Fok);
+        let json = serde_json::to_string(&d).unwrap();
+        let back: Decision = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.order_kind, OrderKind::Fok));
+    }
+
+    #[test]
+    fn decision_deserializes_legacy_json_without_new_fields() {
+        // A Decision serialized before 0.2b (no order_kind / limit_price)
+        // must still deserialize, defaulting to a market entry.
+        let legacy =
+            r#"{"signal":"buy","confidence":0.7,"stop_price":null,"take_profit_price":null}"#;
+        let back: Decision = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(back.signal, SignalType::Buy));
+        assert!(matches!(back.order_kind, OrderKind::Market));
+        assert!(back.limit_price.is_none());
     }
 
     #[test]

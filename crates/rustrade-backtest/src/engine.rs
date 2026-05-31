@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
 use rustrade_core::{
-    Brain, Candle, Decision, Exchange, Fill, MarketDataEvent, Position, Side, SignalType, SizeHint,
-    Symbol,
+    Brain, Candle, Decision, Exchange, Fill, MarketDataEvent, OrderKind, Position, Side,
+    SignalType, SizeHint, Symbol,
 };
 use rustrade_risk::PositionSizer;
 
@@ -161,10 +161,11 @@ impl Backtest {
             }
             signals_emitted += 1;
 
-            // Translate the decision into a concrete (side, qty). For
+            // Translate the decision into a concrete fill request. For
             // `Close` we use the existing position size. For Buy/Sell we
-            // size from the brain's hint just like ExecutionService.
-            let Some((side, qty, is_close)) = resolve_order(
+            // size from the brain's hint just like ExecutionService, and
+            // carry the requested order kind + limit price.
+            let Some(resolved) = resolve_order(
                 &decision,
                 &position,
                 &sizer,
@@ -174,17 +175,33 @@ impl Backtest {
                 state.sample_step(symbol, candle.close, self.config.contract_value);
                 continue;
             };
-            if qty <= 0.0 {
+            if resolved.qty <= 0.0 {
                 state.sample_step(symbol, candle.close, self.config.contract_value);
                 continue;
             }
 
-            // Apply slippage + fees.
-            let fill_price = self.config.slippage.apply(side, candle.close);
+            // Decide the fill by order kind. Market / IOC / FOK and closes
+            // are immediate takers at the candle close. Limit / PostOnly
+            // rest and fill only if this candle's range crosses the limit
+            // (a post-only that would cross as taker is rejected). A limit
+            // that doesn't cross is treated as unfilled and dropped — orders
+            // that rest across candles or partially fill need an order book
+            // (a 0.4a item).
+            let Some((reference_price, is_taker)) = resolve_fill(&resolved, candle) else {
+                state.sample_step(symbol, candle.close, self.config.contract_value);
+                continue;
+            };
+            // Slippage applies to taker fills (crossing the spread); a
+            // resting maker fills at its limit price exactly.
+            let fill_price = if is_taker {
+                self.config.slippage.apply(resolved.side, reference_price)
+            } else {
+                reference_price
+            };
             let fee = self.config.fees.fee_for(
                 fill_price,
-                qty * self.config.contract_value,
-                true, // every order is a taker in Phase 4a
+                resolved.qty * self.config.contract_value,
+                is_taker,
             );
 
             // Update position state. If this fill reduces or flips the
@@ -192,8 +209,8 @@ impl Backtest {
             apply_fill(
                 &mut state,
                 symbol,
-                side,
-                qty,
+                resolved.side,
+                resolved.qty,
                 fill_price,
                 fee,
                 self.config.contract_value,
@@ -209,9 +226,9 @@ impl Backtest {
                 symbol: symbol.clone(),
                 order_id: format!("bt-{orders_filled}"),
                 client_id: None,
-                side,
+                side: resolved.side,
                 price: rustrade_core::Price(fill_price),
-                size: rustrade_core::Volume(qty),
+                size: rustrade_core::Volume(resolved.qty),
                 fee,
                 fee_currency: "QUOTE".into(),
                 timestamp: candle_time(candle),
@@ -222,7 +239,6 @@ impl Backtest {
                 .map_err(|e| Error::Brain(e.to_string()))?;
 
             state.sample_step(symbol, candle.close, self.config.contract_value);
-            let _ = is_close;
         }
 
         let total_fees: f64 = trades.iter().map(|t| t.fee).sum();
@@ -418,19 +434,36 @@ pub(crate) fn validate_candle(c: &Candle) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Resolve a `Decision` into a concrete `(side, qty, is_close)`.
+/// A decision resolved into a concrete fill request for the engine.
+struct ResolvedOrder {
+    side: Side,
+    qty: f64,
+    is_close: bool,
+    kind: OrderKind,
+    /// Limit price (quote currency) for resting kinds; `None` for market
+    /// and close orders.
+    limit_price: Option<f64>,
+}
+
+/// Resolve a `Decision` into a [`ResolvedOrder`].
 fn resolve_order(
     decision: &Decision,
     position: &Position,
     sizer: &PositionSizer,
     price: f64,
     contract_value: f64,
-) -> Option<(Side, f64, bool)> {
+) -> Option<ResolvedOrder> {
     match decision.signal {
         SignalType::Hold => None,
         SignalType::Close => {
             let close_side = position.close_side()?;
-            Some((close_side, position.qty.abs(), true))
+            Some(ResolvedOrder {
+                side: close_side,
+                qty: position.qty.abs(),
+                is_close: true,
+                kind: OrderKind::Market,
+                limit_price: None,
+            })
         }
         SignalType::Buy | SignalType::Sell => {
             let side = if matches!(decision.signal, SignalType::Buy) {
@@ -442,10 +475,61 @@ fn resolve_order(
             if contracts == 0 {
                 None
             } else {
-                Some((side, contracts as f64, false))
+                Some(ResolvedOrder {
+                    side,
+                    qty: contracts as f64,
+                    is_close: false,
+                    kind: decision.order_kind,
+                    limit_price: decision.limit_price.map(|p| p.value()),
+                })
             }
         }
     }
+}
+
+/// Decide whether and at what reference price a resolved order fills on
+/// `candle`. Returns `(reference_price, is_taker)`; the caller applies
+/// slippage to taker fills. Returns `None` when a resting limit doesn't
+/// cross this candle (or a post-only would cross as taker).
+///
+/// - **Market / IOC / FOK and closes** fill immediately at the candle
+///   close as takers.
+/// - **Limit / PostOnly** rest: a buy fills when `low` trades down to the
+///   limit, a sell when `high` trades up to it. A limit already marketable
+///   at the candle open fills at the open as a taker (a post-only in that
+///   case is rejected); a non-marketable limit fills at its limit price as
+///   a maker. A missing limit falls back to the close, mirroring the live
+///   execution layer's event-price fallback.
+fn resolve_fill(resolved: &ResolvedOrder, candle: &Candle) -> Option<(f64, bool)> {
+    if resolved.is_close
+        || matches!(
+            resolved.kind,
+            OrderKind::Market | OrderKind::Ioc | OrderKind::Fok
+        )
+    {
+        return Some((candle.close, true));
+    }
+
+    let limit = resolved.limit_price.unwrap_or(candle.close);
+    let (fills, price, marketable) = match resolved.side {
+        Side::Buy => (
+            candle.low <= limit,
+            limit.min(candle.open),
+            limit >= candle.open,
+        ),
+        Side::Sell => (
+            candle.high >= limit,
+            limit.max(candle.open),
+            limit <= candle.open,
+        ),
+    };
+    if !fills {
+        return None;
+    }
+    if matches!(resolved.kind, OrderKind::PostOnly) && marketable {
+        return None;
+    }
+    Some((price, marketable))
 }
 
 fn size_from_hint(sizer: &PositionSizer, hint: SizeHint, price: f64, contract_value: f64) -> u32 {

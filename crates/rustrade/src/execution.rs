@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use chrono::Utc;
 use rustrade_core::{
-    Brain, ExchangeClient, MarketDataBus, MarketDataEvent, Order, Position, Price, Side, Signal,
-    SignalBus, SignalType, SizeHint, Symbol, Volume,
+    Brain, Capability, Decision, ExchangeClient, MarketDataBus, MarketDataEvent, Order, OrderKind,
+    Position, Price, Side, Signal, SignalBus, SignalType, SizeHint, StopAttachment, Symbol, Volume,
 };
 use rustrade_risk::{PositionSizer, SizingConfig};
 use rustrade_supervisor::{RestartPolicy, TradingService};
@@ -190,7 +190,7 @@ impl ExecutionService {
         event: &MarketDataEvent,
         symbol: &Symbol,
         position: &Position,
-        decision: &rustrade_core::Decision,
+        decision: &Decision,
     ) -> Option<Order> {
         match decision.signal {
             SignalType::Hold => None,
@@ -230,13 +230,105 @@ impl ExecutionService {
                     );
                     return None;
                 }
-                Some(Order::market(
-                    symbol.clone(),
-                    side,
-                    Volume(contracts as f64),
-                ))
+                let size = Volume(contracts as f64);
+
+                // ── Order-kind capability gate ────────────────────────
+                // Block (don't silently downgrade) a kind the adapter
+                // can't honour — downgrading post-only / IOC / FOK would
+                // change the fill and fee semantics the brain relied on.
+                let kind = decision.order_kind;
+                if let Some(cap) = capability_for_kind(kind)
+                    && !self.ctx.exchange.supports(cap)
+                {
+                    self.orders_blocked.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        service = %self.name,
+                        symbol = %symbol,
+                        signal = %decision.signal,
+                        ?kind,
+                        required = ?cap,
+                        "decision blocked: adapter does not support requested order kind"
+                    );
+                    return None;
+                }
+
+                // ── Build the base order for the requested kind ───────
+                let order = match kind {
+                    OrderKind::Market => Order::market(symbol.clone(), side, size),
+                    OrderKind::Limit | OrderKind::PostOnly | OrderKind::Ioc | OrderKind::Fok => {
+                        let limit = decision.limit_price.unwrap_or_else(|| {
+                            tracing::warn!(
+                                service = %self.name,
+                                symbol = %symbol,
+                                ?kind,
+                                fallback = price.value(),
+                                "non-market order kind without limit_price; \
+                                 falling back to event price"
+                            );
+                            price
+                        });
+                        let mut o = Order::limit(symbol.clone(), side, size, limit);
+                        o.kind = kind;
+                        o
+                    }
+                };
+
+                // ── Attach protective stop / take-profit if requested ──
+                Some(self.attach_protection(order, symbol, decision))
             }
         }
+    }
+
+    /// Attach a protective [`StopAttachment`] derived from
+    /// `decision.stop_price` / `take_profit_price`, gated on
+    /// [`Capability::StopOrders`].
+    ///
+    /// The current [`Order`] model carries a single attachment, so a full
+    /// bracket (stop-loss **and** take-profit on one order) can't be
+    /// expressed yet — stop-loss takes priority and the take-profit is
+    /// logged as dropped. Simultaneous SL+TP (OCO / bracket) is a follow-up
+    /// once the order tracker (0.2c) can manage paired orders. When the
+    /// adapter lacks `StopOrders`, the order is placed **without**
+    /// protection and a warning is emitted (never silently dropped) — a
+    /// brain that requires stops can introspect `supports` itself.
+    fn attach_protection(&self, order: Order, symbol: &Symbol, decision: &Decision) -> Order {
+        let stop = match (decision.stop_price, decision.take_profit_price) {
+            (Some(sl), Some(_tp)) => {
+                tracing::warn!(
+                    service = %self.name,
+                    symbol = %symbol,
+                    "both stop_price and take_profit_price set; attaching stop-loss only \
+                     (bracket / OCO awaits the order tracker)"
+                );
+                StopAttachment::stop_market(sl)
+            }
+            (Some(sl), None) => StopAttachment::stop_market(sl),
+            (None, Some(tp)) => StopAttachment::take_profit(tp),
+            (None, None) => return order,
+        };
+
+        if self.ctx.exchange.supports(Capability::StopOrders) {
+            order.with_stop(stop)
+        } else {
+            tracing::warn!(
+                service = %self.name,
+                symbol = %symbol,
+                "protective stop / take-profit requested but adapter lacks \
+                 Capability::StopOrders; placing order WITHOUT protection"
+            );
+            order
+        }
+    }
+}
+
+/// The adapter [`Capability`] a given [`OrderKind`] requires, if any.
+/// `Market` and `Limit` are assumed universally supported.
+fn capability_for_kind(kind: OrderKind) -> Option<Capability> {
+    match kind {
+        OrderKind::Market | OrderKind::Limit => None,
+        OrderKind::PostOnly => Some(Capability::PostOnly),
+        OrderKind::Ioc => Some(Capability::Ioc),
+        OrderKind::Fok => Some(Capability::Fok),
     }
 }
 
