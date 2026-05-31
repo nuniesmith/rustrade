@@ -64,7 +64,7 @@ fn config() -> BotConfig {
         .unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread", start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn risk_state_survives_restart_via_shared_store() {
     let store: Arc<dyn StateStore> = Arc::new(InMemoryStore::new());
     let sym = Symbol::from("BTCUSDT");

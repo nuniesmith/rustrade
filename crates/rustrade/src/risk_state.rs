@@ -263,7 +263,7 @@ mod tests {
         let cb = cb_cfg(2);
 
         // Trip the breaker + book a loss in map A.
-        let map_a = build_risk_state(&[sym.clone()], &pnl, &cb);
+        let map_a = build_risk_state(std::slice::from_ref(&sym), &pnl, &cb);
         {
             let mut w = map_a.write().await;
             let sr = w.get_mut(&sym).unwrap();
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(store.len(), 1);
 
         // Restore into a fresh map B.
-        let map_b = build_risk_state(&[sym.clone()], &pnl, &cb);
+        let map_b = build_risk_state(std::slice::from_ref(&sym), &pnl, &cb);
         assert!(
             !map_b
                 .read()
@@ -304,7 +304,11 @@ mod tests {
     #[tokio::test]
     async fn restore_without_snapshot_is_noop() {
         let sym = Symbol::from("ETHUSDT");
-        let map = build_risk_state(&[sym.clone()], &SessionPnlConfig::default(), &cb_cfg(4));
+        let map = build_risk_state(
+            std::slice::from_ref(&sym),
+            &SessionPnlConfig::default(),
+            &cb_cfg(4),
+        );
         let persister = RiskPersister::new(Arc::new(InMemoryStore::new()), "test-bot".into());
         persister.restore_into(&map).await;
         let r = map.read().await;
@@ -316,7 +320,11 @@ mod tests {
     #[tokio::test]
     async fn restore_ignores_unknown_version() {
         let sym = Symbol::from("BTCUSDT");
-        let map = build_risk_state(&[sym.clone()], &SessionPnlConfig::default(), &cb_cfg(4));
+        let map = build_risk_state(
+            std::slice::from_ref(&sym),
+            &SessionPnlConfig::default(),
+            &cb_cfg(4),
+        );
         let store = Arc::new(InMemoryStore::new());
         // Seed a future-version blob that must be ignored, not misread.
         let bogus = serde_json::json!({
