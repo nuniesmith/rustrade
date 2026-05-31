@@ -1,6 +1,6 @@
 [package]
-name         = "rustrade"
-description  = "Open-source trading bot framework — the crate downstream services depend on"
+name         = "rustrade-framework"
+description  = "Open-source trading bot framework — the facade crate downstream services depend on (imported as `rustrade`)"
 version.workspace      = true
 edition.workspace      = true
 authors.workspace      = true
@@ -10,6 +10,15 @@ rust-version.workspace = true
 readme     = "README.md"
 keywords   = ["trading", "crypto", "bot", "framework"]
 categories = ["asynchronous", "api-bindings"]
+
+# The crates.io package is `rustrade-framework` (the bare `rustrade` name is
+# taken by an unrelated project), but the library is imported as `rustrade`
+# — so downstream code is `use rustrade::{Bot, ...}` and every doc/example
+# is unchanged. Only the dependency line (`cargo add rustrade-framework`)
+# differs from the package name.
+[lib]
+name = "rustrade"
+path = "src/lib.rs"
 
 [features]
 # Forward `prometheus` to the supervisor crate so feature-gated metrics

@@ -87,8 +87,8 @@ that it ships with — at the cost of per-crate flexibility.
 
 0.1.0 is tagged. While the workspace is in `0.x`, any minor release may
 contain breaking changes; the `CHANGELOG.md` flags them with **BREAKING**
-on the relevant bullet. Pin to an exact version (`rustrade = "=0.1.0"`)
-until the API stabilises at 1.0.
+on the relevant bullet. Pin to an exact version
+(`rustrade-framework = "=0.2.0"`) until the API stabilises at 1.0.
 
 Publish workflow (run in this order; not yet automated):
 

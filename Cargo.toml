@@ -92,7 +92,7 @@ proptest = "1"
 # Internal — `version` must track [workspace.package].version above so a
 # `cargo publish` resolves each path dependency to its just-bumped sibling.
 # Keep all five in lockstep with the workspace version on every release.
-rustrade            = { path = "crates/rustrade",            version = "0.2.0" }
+rustrade            = { path = "crates/rustrade",            version = "0.2.0", package = "rustrade-framework" }
 rustrade-backtest   = { path = "crates/rustrade-backtest",   version = "0.2.0" }
 rustrade-core       = { path = "crates/rustrade-core",       version = "0.2.0" }
 rustrade-risk       = { path = "crates/rustrade-risk",       version = "0.2.0" }
