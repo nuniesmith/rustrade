@@ -206,19 +206,18 @@ pub type RiskStateMap = Arc<RwLock<HashMap<Symbol, SymbolRisk>>>;
 /// be wired to a `FillSource` in Phase 2c.
 pub type PositionCache = Arc<RwLock<HashMap<Symbol, Position>>>;
 
-/// Build an empty risk state map seeded with one [`SymbolRisk`] per
-/// configured symbol.
+/// Build a risk-state map seeded with one [`SymbolRisk`] per configured
+/// symbol. `cfg_for` resolves the `(SessionPnlConfig, CircuitBreakerConfig)`
+/// for each symbol — callers pass a closure that applies any per-symbol
+/// override over the bot's default (see `BotConfig::risk_for`).
 pub fn build_risk_state(
     symbols: &[Symbol],
-    pnl_config: &SessionPnlConfig,
-    breaker_config: &CircuitBreakerConfig,
+    cfg_for: impl Fn(&Symbol) -> (SessionPnlConfig, CircuitBreakerConfig),
 ) -> RiskStateMap {
     let mut map = HashMap::with_capacity(symbols.len());
     for sym in symbols {
-        map.insert(
-            sym.clone(),
-            SymbolRisk::new(sym, pnl_config.clone(), breaker_config.clone()),
-        );
+        let (pnl, breaker) = cfg_for(sym);
+        map.insert(sym.clone(), SymbolRisk::new(sym, pnl, breaker));
     }
     Arc::new(RwLock::new(map))
 }
@@ -263,7 +262,7 @@ mod tests {
         let cb = cb_cfg(2);
 
         // Trip the breaker + book a loss in map A.
-        let map_a = build_risk_state(std::slice::from_ref(&sym), &pnl, &cb);
+        let map_a = build_risk_state(std::slice::from_ref(&sym), |_| (pnl.clone(), cb.clone()));
         {
             let mut w = map_a.write().await;
             let sr = w.get_mut(&sym).unwrap();
@@ -279,7 +278,7 @@ mod tests {
         assert_eq!(store.len(), 1);
 
         // Restore into a fresh map B.
-        let map_b = build_risk_state(std::slice::from_ref(&sym), &pnl, &cb);
+        let map_b = build_risk_state(std::slice::from_ref(&sym), |_| (pnl.clone(), cb.clone()));
         assert!(
             !map_b
                 .read()
@@ -304,11 +303,9 @@ mod tests {
     #[tokio::test]
     async fn restore_without_snapshot_is_noop() {
         let sym = Symbol::from("ETHUSDT");
-        let map = build_risk_state(
-            std::slice::from_ref(&sym),
-            &SessionPnlConfig::default(),
-            &cb_cfg(4),
-        );
+        let map = build_risk_state(std::slice::from_ref(&sym), |_| {
+            (SessionPnlConfig::default(), cb_cfg(4))
+        });
         let persister = RiskPersister::new(Arc::new(InMemoryStore::new()), "test-bot".into());
         persister.restore_into(&map).await;
         let r = map.read().await;
@@ -320,11 +317,9 @@ mod tests {
     #[tokio::test]
     async fn restore_ignores_unknown_version() {
         let sym = Symbol::from("BTCUSDT");
-        let map = build_risk_state(
-            std::slice::from_ref(&sym),
-            &SessionPnlConfig::default(),
-            &cb_cfg(4),
-        );
+        let map = build_risk_state(std::slice::from_ref(&sym), |_| {
+            (SessionPnlConfig::default(), cb_cfg(4))
+        });
         let store = Arc::new(InMemoryStore::new());
         // Seed a future-version blob that must be ignored, not misread.
         let bogus = serde_json::json!({
@@ -351,6 +346,31 @@ mod tests {
                 .unwrap()
                 .session_pnl
                 .is_session_halted()
+        );
+    }
+
+    #[tokio::test]
+    async fn build_risk_state_applies_per_symbol_overrides() {
+        // BTC gets a tight 1-loss breaker; ETH keeps a loose 5-loss one.
+        let btc = Symbol::from("BTCUSDT");
+        let eth = Symbol::from("ETHUSDT");
+        let symbols = [btc.clone(), eth.clone()];
+        let map = build_risk_state(&symbols, |s| {
+            let limit = if s == &btc { 1 } else { 5 };
+            (SessionPnlConfig::default(), cb_cfg(limit))
+        });
+
+        let mut w = map.write().await;
+        // One loss trips BTC (limit 1) but not ETH (limit 5).
+        w.get_mut(&btc).unwrap().circuit_breaker.record_loss();
+        w.get_mut(&eth).unwrap().circuit_breaker.record_loss();
+        assert!(
+            w.get(&btc).unwrap().circuit_breaker.is_tripped(),
+            "BTC's 1-loss breaker should trip"
+        );
+        assert!(
+            !w.get(&eth).unwrap().circuit_breaker.is_tripped(),
+            "ETH's 5-loss breaker should not trip on one loss"
         );
     }
 }

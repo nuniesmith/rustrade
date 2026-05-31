@@ -16,6 +16,7 @@
 //! that aborts the service. A `Decision::Close` for a flat position is
 //! also a silent skip (logged at debug level).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -43,7 +44,9 @@ pub(crate) struct ExecutionContext {
     pub signals: SignalBus,
     pub positions: PositionCache,
     pub risk: RiskStateMap,
-    pub sizing: Arc<SizingConfig>,
+    /// Per-symbol sizing resolver (default + overrides). The execution
+    /// service sizes each order with the config for the event's symbol.
+    pub sizing: Arc<SymbolSizing>,
     /// Set when order tracking is wired (`Bot::with_order_tracking`) and the
     /// adapter advertises `Capability::OrderTracking`. Resting orders the
     /// service places are recorded here so the reaper can age them out.
@@ -54,6 +57,26 @@ pub(crate) struct ExecutionContext {
     /// then gets two reduce-only protective orders registered as an OCO
     /// pair here; the `FillRoutingService` cancels the sibling on fill.
     pub oco: Option<crate::order_tracker::OcoRegistry>,
+}
+
+/// Resolves the [`SizingConfig`] to use for a given symbol: a per-symbol
+/// override if one exists, otherwise the bot-wide default.
+pub(crate) struct SymbolSizing {
+    default: SizingConfig,
+    per_symbol: HashMap<Symbol, SizingConfig>,
+}
+
+impl SymbolSizing {
+    pub(crate) fn new(default: SizingConfig, per_symbol: HashMap<Symbol, SizingConfig>) -> Self {
+        Self {
+            default,
+            per_symbol,
+        }
+    }
+
+    pub(crate) fn for_symbol(&self, symbol: &Symbol) -> &SizingConfig {
+        self.per_symbol.get(symbol).unwrap_or(&self.default)
+    }
 }
 
 /// Per-brain execution loop with full risk gating + order placement.
@@ -238,8 +261,12 @@ impl ExecutionService {
                 };
                 let price = price_from_event(event)?;
                 let contract_value = self.ctx.exchange.contract_value(symbol);
-                let contracts =
-                    size_decision(&self.ctx.sizing, decision.size_hint, price, contract_value);
+                let contracts = size_decision(
+                    self.ctx.sizing.for_symbol(symbol),
+                    decision.size_hint,
+                    price,
+                    contract_value,
+                );
 
                 if contracts == 0 {
                     self.orders_blocked.fetch_add(1, Ordering::Relaxed);
