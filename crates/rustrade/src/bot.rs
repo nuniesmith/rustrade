@@ -4,6 +4,7 @@
 //! `Bot::run_until_shutdown` starts the framework services and blocks
 //! until shutdown is triggered (via signal or [`BotHandle::shutdown`]).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,10 +27,11 @@ use crate::services::{CandlePollerService, FillRoutingService, MarketFeedService
 const DEFAULT_MARKET_BUS_CAPACITY: usize = 1024;
 const DEFAULT_SIGNAL_BUS_CAPACITY: usize = 256;
 
-/// Risk-layer defaults applied to every symbol in the bot's config.
-///
-/// Per-symbol overrides are a Phase 2c concern — for now every configured
-/// symbol gets the same `SessionPnl`, `CircuitBreaker`, and `PositionSizer`.
+/// Risk-layer config for a symbol: session-PnL cap, circuit breaker, and
+/// position sizing. Used both as the bot-wide default
+/// ([`BotConfig::risk`]) and as a per-symbol override
+/// ([`BotConfig::per_symbol_risk`], set via
+/// [`BotConfigBuilder::symbol_risk`]).
 #[derive(Debug, Clone, Default)]
 pub struct RiskConfig {
     /// Session PnL config applied to every configured symbol.
@@ -96,14 +98,27 @@ pub struct BotConfig {
     /// before exit, using `ExchangeClient::close_position`. Best-effort:
     /// failures are logged but do not propagate.
     pub close_positions_on_shutdown: bool,
-    /// Risk-layer defaults applied to every configured symbol.
+    /// Risk-layer defaults applied to every configured symbol that has no
+    /// entry in [`Self::per_symbol_risk`].
     pub risk: RiskConfig,
+    /// Per-symbol risk overrides. A symbol present here uses its own
+    /// [`RiskConfig`] (session-PnL cap, circuit breaker, and sizing) instead
+    /// of [`Self::risk`] — e.g. a tighter drawdown cap on a volatile alt, or
+    /// a larger size on a flagship symbol. Symbols absent here use the
+    /// default. Resolve with [`Self::risk_for`].
+    pub per_symbol_risk: HashMap<Symbol, RiskConfig>,
 }
 
 impl BotConfig {
     /// Begin building a config with sensible defaults.
     pub fn builder() -> BotConfigBuilder {
         BotConfigBuilder::default()
+    }
+
+    /// The effective [`RiskConfig`] for `symbol`: its per-symbol override if
+    /// one is set, otherwise the bot-wide default ([`Self::risk`]).
+    pub fn risk_for(&self, symbol: &Symbol) -> &RiskConfig {
+        self.per_symbol_risk.get(symbol).unwrap_or(&self.risk)
     }
 }
 
@@ -118,6 +133,7 @@ pub struct BotConfigBuilder {
     signal_bus_capacity: Option<usize>,
     close_positions_on_shutdown: Option<bool>,
     risk: RiskConfig,
+    per_symbol_risk: HashMap<Symbol, RiskConfig>,
 }
 
 impl BotConfigBuilder {
@@ -192,6 +208,33 @@ impl BotConfigBuilder {
         self
     }
 
+    /// Set a per-symbol [`RiskConfig`] override. The given symbol then uses
+    /// this config (session-PnL cap, circuit breaker, sizing) instead of the
+    /// bot-wide default. Repeated calls for the same symbol replace the
+    /// previous override. Symbols without an override use the default.
+    ///
+    /// ```
+    /// use rustrade::{BotConfig, RiskConfig};
+    /// use rustrade::SessionPnlConfig;
+    ///
+    /// let cfg = BotConfig::builder()
+    ///     .name("bot")
+    ///     .symbols(["BTCUSDT", "DOGEUSDT"])
+    ///     .without_signal_handler()
+    ///     // tighter daily loss cap on the volatile alt
+    ///     .symbol_risk("DOGEUSDT", RiskConfig {
+    ///         session_pnl: SessionPnlConfig { loss_limit: -20.0 },
+    ///         ..Default::default()
+    ///     })
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(cfg.risk_for(&"DOGEUSDT".into()).session_pnl.loss_limit, -20.0);
+    /// ```
+    pub fn symbol_risk(mut self, symbol: impl Into<Symbol>, cfg: RiskConfig) -> Self {
+        self.per_symbol_risk.insert(symbol.into(), cfg);
+        self
+    }
+
     /// Validate and build. Returns `Error::Config` on any constraint
     /// violation — the framework never panics on bad config.
     pub fn build(self) -> Result<BotConfig> {
@@ -232,16 +275,11 @@ impl BotConfigBuilder {
             ));
         }
 
-        if self.risk.session_pnl.loss_limit.is_nan() {
-            return Err(Error::config(
-                "BotConfig.risk.session_pnl.loss_limit must not be NaN",
-            ));
-        }
-        if !self.risk.sizing.margin_per_trade.is_finite() || self.risk.sizing.margin_per_trade < 0.0
-        {
-            return Err(Error::config(
-                "BotConfig.risk.sizing.margin_per_trade must be a finite non-negative number",
-            ));
+        // Validate the default risk config and every per-symbol override
+        // with the same rules — bad config never reaches the runtime.
+        validate_risk(&self.risk, "BotConfig.risk")?;
+        for (sym, cfg) in &self.per_symbol_risk {
+            validate_risk(cfg, &format!("BotConfig.per_symbol_risk[{sym}]"))?;
         }
 
         Ok(BotConfig {
@@ -253,8 +291,25 @@ impl BotConfigBuilder {
             signal_bus_capacity,
             close_positions_on_shutdown: self.close_positions_on_shutdown.unwrap_or(false),
             risk: self.risk,
+            per_symbol_risk: self.per_symbol_risk,
         })
     }
+}
+
+/// Validate a [`RiskConfig`] (the default or a per-symbol override).
+/// `ctx` names the offending field in the error.
+fn validate_risk(risk: &RiskConfig, ctx: &str) -> Result<()> {
+    if risk.session_pnl.loss_limit.is_nan() {
+        return Err(Error::config(format!(
+            "{ctx}.session_pnl.loss_limit must not be NaN"
+        )));
+    }
+    if !risk.sizing.margin_per_trade.is_finite() || risk.sizing.margin_per_trade < 0.0 {
+        return Err(Error::config(format!(
+            "{ctx}.sizing.margin_per_trade must be a finite non-negative number"
+        )));
+    }
+    Ok(())
 }
 
 /// The embedded trading bot.
@@ -363,11 +418,10 @@ impl Bot {
         let market_bus = MarketDataBus::with_capacity(config.market_bus_capacity);
         let signal_bus = SignalBus::with_capacity(config.signal_bus_capacity);
         let positions = build_position_cache(&config.symbols);
-        let risk = build_risk_state(
-            &config.symbols,
-            &config.risk.session_pnl,
-            &config.risk.circuit_breaker,
-        );
+        let risk = build_risk_state(&config.symbols, |sym| {
+            let r = config.risk_for(sym);
+            (r.session_pnl.clone(), r.circuit_breaker.clone())
+        });
 
         let brains = Arc::new(brains);
         let persister_slot: crate::handle::PersisterSlot = Arc::new(std::sync::OnceLock::new());
@@ -626,7 +680,14 @@ impl Bot {
         let oco = brackets_active.then(crate::order_tracker::OcoRegistry::new);
         tracing::info!(brackets_active, "bracket (SL+TP/OCO) support");
 
-        let sizing = Arc::new(self.config.risk.sizing.clone());
+        let sizing = Arc::new(crate::execution::SymbolSizing::new(
+            self.config.risk.sizing.clone(),
+            self.config
+                .per_symbol_risk
+                .iter()
+                .map(|(s, r)| (s.clone(), r.sizing.clone()))
+                .collect(),
+        ));
         let ctx = ExecutionContext {
             exchange: self.exchange.clone(),
             bus: self.market_bus.clone(),
@@ -951,6 +1012,51 @@ mod tests {
             .unwrap();
         assert_eq!(c.risk.session_pnl.loss_limit, -123.0);
         assert_eq!(c.risk.sizing.leverage, 10);
+    }
+
+    #[test]
+    fn per_symbol_risk_override_and_fallback() {
+        let c = BotConfig::builder()
+            .name("x")
+            .symbols(["BTCUSDT", "ETHUSDT"])
+            .session_pnl_config(SessionPnlConfig { loss_limit: -100.0 }) // default
+            .symbol_risk(
+                "BTCUSDT",
+                RiskConfig {
+                    session_pnl: SessionPnlConfig { loss_limit: -25.0 },
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap();
+        // BTC uses its override; ETH (no override) uses the default.
+        assert_eq!(
+            c.risk_for(&Symbol::from("BTCUSDT")).session_pnl.loss_limit,
+            -25.0
+        );
+        assert_eq!(
+            c.risk_for(&Symbol::from("ETHUSDT")).session_pnl.loss_limit,
+            -100.0
+        );
+    }
+
+    #[test]
+    fn builder_rejects_invalid_per_symbol_override() {
+        let err = BotConfig::builder()
+            .name("x")
+            .symbol("BTCUSDT")
+            .symbol_risk(
+                "BTCUSDT",
+                RiskConfig {
+                    session_pnl: SessionPnlConfig {
+                        loss_limit: f64::NAN,
+                    },
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
     }
 
     #[test]
