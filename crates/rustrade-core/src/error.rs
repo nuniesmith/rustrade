@@ -35,6 +35,10 @@ pub enum Error {
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    /// A state-store persistence failure (backend I/O, corrupt snapshot).
+    #[error("state store error: {0}")]
+    Storage(String),
+
     /// An otherwise-uncategorised framework error.
     #[error("internal error: {0}")]
     Internal(String),
@@ -64,5 +68,10 @@ impl Error {
     /// Convenience constructor for `Internal` variant.
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
+    }
+
+    /// Convenience constructor for `Storage` variant.
+    pub fn storage(msg: impl Into<String>) -> Self {
+        Self::Storage(msg.into())
     }
 }

@@ -27,7 +27,7 @@ use rustrade_core::{
 use rustrade_supervisor::{RestartPolicy, TradingService};
 use tokio_util::sync::CancellationToken;
 
-use crate::risk_state::{PositionCache, RiskStateMap};
+use crate::risk_state::{PositionCache, RiskPersister, RiskStateMap};
 
 // ───────────────────────────────────────────────────────────────────────
 // MarketFeedService
@@ -116,6 +116,7 @@ pub struct FillRoutingService {
     positions: PositionCache,
     risk: RiskStateMap,
     metrics: Arc<dyn MetricsSink>,
+    persister: Option<RiskPersister>,
     fills_routed: AtomicU64,
     refresh_errors: AtomicU64,
     trades_recorded: AtomicU64,
@@ -129,6 +130,7 @@ impl FillRoutingService {
         positions: PositionCache,
         risk: RiskStateMap,
         metrics: Arc<dyn MetricsSink>,
+        persister: Option<RiskPersister>,
     ) -> Self {
         Self {
             source,
@@ -137,6 +139,7 @@ impl FillRoutingService {
             positions,
             risk,
             metrics,
+            persister,
             fills_routed: AtomicU64::new(0),
             refresh_errors: AtomicU64::new(0),
             trades_recorded: AtomicU64::new(0),
@@ -193,26 +196,35 @@ impl FillRoutingService {
         };
 
         // Update the per-symbol risk state directly.
-        let mut map = self.risk.write().await;
-        if let Some(risk) = map.get_mut(&fill.symbol) {
-            risk.session_pnl.record_close(gross, fee_share);
-            let net = gross - fee_share;
-            if net > 0.0 {
-                risk.circuit_breaker.record_win();
-            } else if net < 0.0 {
-                risk.circuit_breaker.record_loss();
+        let recorded = {
+            let mut map = self.risk.write().await;
+            if let Some(risk) = map.get_mut(&fill.symbol) {
+                risk.session_pnl.record_close(gross, fee_share);
+                let net = gross - fee_share;
+                if net > 0.0 {
+                    risk.circuit_breaker.record_win();
+                } else if net < 0.0 {
+                    risk.circuit_breaker.record_loss();
+                }
+                self.trades_recorded.fetch_add(1, Ordering::Relaxed);
+                self.metrics.histogram(
+                    "rustrade_realised_pnl_quote",
+                    &[("symbol", fill.symbol.as_str())],
+                    net,
+                );
+                true
+            } else {
+                tracing::debug!(
+                    symbol = %fill.symbol,
+                    "auto-PnL: symbol not in risk-state map (was it configured?)"
+                );
+                false
             }
-            self.trades_recorded.fetch_add(1, Ordering::Relaxed);
-            self.metrics.histogram(
-                "rustrade_realised_pnl_quote",
-                &[("symbol", fill.symbol.as_str())],
-                net,
-            );
-        } else {
-            tracing::debug!(
-                symbol = %fill.symbol,
-                "auto-PnL: symbol not in risk-state map (was it configured?)"
-            );
+        };
+
+        // Persist the updated risk state (lock released) if a store is wired.
+        if recorded && let Some(persister) = &self.persister {
+            persister.persist_symbol(&self.risk, &fill.symbol).await;
         }
     }
 }

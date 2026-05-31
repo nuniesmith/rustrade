@@ -13,14 +13,19 @@
 //! without contention. All shared state is `Arc`-wrapped, so a clone is
 //! an atomic-ref-count bump.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustrade_core::{Brain, Position, Signal, SignalBus, Symbol};
 use rustrade_supervisor::{ServiceLifecycleSnapshot, Supervisor};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::risk_state::{PositionCache, RiskStateMap};
+use crate::risk_state::{PositionCache, RiskPersister, RiskStateMap};
+
+/// Shared slot for the risk persister. Populated at `run_until_shutdown`
+/// startup (after `with_state_store`), so handle clones taken before the
+/// bot runs still observe it once set.
+pub(crate) type PersisterSlot = Arc<OnceLock<RiskPersister>>;
 
 /// Aggregated health snapshot returned by [`BotHandle::health`].
 #[derive(Debug, Clone)]
@@ -98,6 +103,7 @@ pub struct BotHandle {
     risk: RiskStateMap,
     positions: PositionCache,
     signals: SignalBus,
+    persister: PersisterSlot,
 }
 
 impl BotHandle {
@@ -107,6 +113,7 @@ impl BotHandle {
         risk: RiskStateMap,
         positions: PositionCache,
         signals: SignalBus,
+        persister: PersisterSlot,
     ) -> Self {
         Self {
             cancel: supervisor.cancel_token().clone(),
@@ -115,6 +122,7 @@ impl BotHandle {
             risk,
             positions,
             signals,
+            persister,
         }
     }
 
@@ -144,8 +152,15 @@ impl BotHandle {
     /// Phase 2b does not automate this from the fill stream — that's
     /// `FillRoutingService` territory in Phase 2c.
     pub async fn record_trade_outcome(&self, symbol: &Symbol, gross_pnl: f64, fee: f64) {
-        let mut map = self.risk.write().await;
-        if let Some(risk) = map.get_mut(symbol) {
+        {
+            let mut map = self.risk.write().await;
+            let Some(risk) = map.get_mut(symbol) else {
+                tracing::warn!(
+                    symbol = %symbol,
+                    "record_trade_outcome: symbol not in risk state map (was it configured?)"
+                );
+                return;
+            };
             risk.session_pnl.record_close(gross_pnl, fee);
             let net = gross_pnl - fee;
             if net > 0.0 {
@@ -153,11 +168,11 @@ impl BotHandle {
             } else if net < 0.0 {
                 risk.circuit_breaker.record_loss();
             }
-        } else {
-            tracing::warn!(
-                symbol = %symbol,
-                "record_trade_outcome: symbol not in risk state map (was it configured?)"
-            );
+        }
+        // Persist the updated risk state if a store is wired, so a crash
+        // right after this trade doesn't lose its effect on the gates.
+        if let Some(persister) = self.persister.get() {
+            persister.persist_symbol(&self.risk, symbol).await;
         }
     }
 

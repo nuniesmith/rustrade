@@ -14,6 +14,7 @@
 //! - Trading intents: [`Signal`], [`Decision`], [`SizeHint`]
 //! - Trait contracts: [`Brain`], [`ExchangeClient`], [`MarketSource`]
 //! - Broadcast buses: [`MarketDataBus`], [`SignalBus`]
+//! - State persistence: [`StateStore`], [`InMemoryStore`]
 //! - Error types: [`Error`], [`Result`]
 //!
 //! # What does NOT live here
@@ -40,6 +41,7 @@ pub mod exchange;
 pub mod market;
 pub mod metrics;
 pub mod signal;
+pub mod store;
 pub mod types;
 
 pub use brain::{Brain, BrainHealth, Decision, SizeHint};
@@ -51,6 +53,7 @@ pub use exchange::{
 pub use market::{Exchange, MarketDataEvent, Side, Symbol};
 pub use metrics::{MetricsSink, NoopSink};
 pub use signal::{Signal, SignalType};
+pub use store::{InMemoryStore, StateStore};
 pub use types::{
     Candle, Fill, Order, OrderKind, Position, Price, StopAttachment, StopKind, Tick, Volume,
 };

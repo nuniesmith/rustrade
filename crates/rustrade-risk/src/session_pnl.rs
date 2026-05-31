@@ -32,6 +32,36 @@ impl Default for SessionPnlConfig {
     }
 }
 
+/// Restart-durable snapshot of a [`SessionPnl`]'s mutable state.
+///
+/// Captures the running totals and halt flag — **not** the configured
+/// `loss_limit`, the symbol, or the clock. Those come from the live
+/// instance on restore, so an operator can adjust the loss limit between
+/// runs and the new value takes effect immediately.
+///
+/// Restore via [`SessionPnl::restore`]. Because `last_reset_day` is kept,
+/// calling [`SessionPnl::tick`] right after a restore correctly rolls the
+/// session over if the snapshot was taken on an earlier UTC day.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionPnlSnapshot {
+    /// Cumulative gross realised PnL, in quote currency.
+    pub realised: f64,
+    /// Cumulative fees paid this session, in quote currency.
+    pub fees: f64,
+    /// Total trades recorded this session.
+    pub trades: u32,
+    /// Wins (net PnL > 0).
+    pub wins: u32,
+    /// Losses (net PnL < 0).
+    pub losses: u32,
+    /// Break-evens (net PnL == 0).
+    pub breakevens: u32,
+    /// Whether the session was halted by the loss cap when snapshotted.
+    pub halted: bool,
+    /// UTC day number of the last reset, for rollover detection on restore.
+    pub last_reset_day: u64,
+}
+
 /// Running PnL totals for one trading session, with an optional drawdown
 /// cap that auto-resets at the daily 00:00 UTC boundary.
 ///
@@ -178,6 +208,41 @@ impl SessionPnl {
         }
     }
 
+    /// Capture the mutable session state for persistence.
+    ///
+    /// Pairs with [`Self::restore`]. The configured `loss_limit`, symbol,
+    /// and clock are intentionally excluded — they belong to the live
+    /// instance, not the snapshot.
+    pub fn snapshot(&self) -> SessionPnlSnapshot {
+        SessionPnlSnapshot {
+            realised: self.realised,
+            fees: self.fees,
+            trades: self.trades,
+            wins: self.wins,
+            losses: self.losses,
+            breakevens: self.breakevens,
+            halted: self.halted,
+            last_reset_day: self.last_reset_day,
+        }
+    }
+
+    /// Restore session state from a [`SessionPnlSnapshot`].
+    ///
+    /// Overwrites the running totals, halt flag, and last-reset day; keeps
+    /// the symbol, configured loss limit, and clock from the live instance.
+    /// Call [`Self::tick`] afterwards so a snapshot taken on an earlier UTC
+    /// day rolls over to a fresh session instead of resuming a stale halt.
+    pub fn restore(&mut self, snap: SessionPnlSnapshot) {
+        self.realised = snap.realised;
+        self.fees = snap.fees;
+        self.trades = snap.trades;
+        self.wins = snap.wins;
+        self.losses = snap.losses;
+        self.breakevens = snap.breakevens;
+        self.halted = snap.halted;
+        self.last_reset_day = snap.last_reset_day;
+    }
+
     /// Force a session reset. Normally called automatically by `tick` at
     /// the daily UTC rollover.
     pub fn reset_session(&mut self) {
@@ -289,5 +354,63 @@ mod tests {
             "intra-day tick must not reset session totals"
         );
         assert_eq!(p.trades, 1);
+    }
+
+    #[test]
+    fn snapshot_restore_roundtrips_state() {
+        let mut p = SessionPnl::new("TEST", cfg(-100.0));
+        p.record_close(10.0, 1.0); // win
+        p.record_close(-30.0, 2.0); // loss
+        let snap = p.snapshot();
+
+        // Restore into a fresh instance (same config) and compare totals.
+        let mut q = SessionPnl::new("TEST", cfg(-100.0));
+        q.restore(snap.clone());
+        assert_eq!(q.snapshot(), snap);
+        assert!((q.net_pnl() - p.net_pnl()).abs() < 1e-9);
+        assert_eq!(q.trades, 2);
+        assert_eq!(q.wins, 1);
+        assert_eq!(q.losses, 1);
+    }
+
+    #[test]
+    fn restore_preserves_halt_within_same_day() {
+        // Snapshot a halted session, restore on the *same* UTC day, tick:
+        // the halt must survive (a restart must not reopen a halted day).
+        let clock = Arc::new(ManualClock::new(200 * 86_400 + 100));
+        let mut p = SessionPnl::with_clock("TEST", cfg(-10.0), clock.clone());
+        p.record_close(-20.0, 0.0);
+        assert!(p.is_session_halted());
+        let snap = p.snapshot();
+
+        let mut q = SessionPnl::with_clock("TEST", cfg(-10.0), clock.clone());
+        q.restore(snap);
+        q.tick(); // same day → no rollover
+        assert!(
+            q.is_session_halted(),
+            "halt must survive a same-day restore"
+        );
+    }
+
+    #[test]
+    fn restore_then_tick_rolls_over_stale_day() {
+        // Snapshot a halted session on day 300; restore on day 301. A
+        // post-restore tick must roll the session over (fresh, un-halted)
+        // so a day-old breaker doesn't wrongly block today's trading.
+        let day = 300u64;
+        let clock = Arc::new(ManualClock::new(day * 86_400 + 100));
+        let mut p = SessionPnl::with_clock("TEST", cfg(-10.0), clock.clone());
+        p.record_close(-50.0, 0.0);
+        assert!(p.is_session_halted());
+        let snap = p.snapshot();
+
+        // Reboot "the next day".
+        let next = Arc::new(ManualClock::new((day + 1) * 86_400 + 5));
+        let mut q = SessionPnl::with_clock("TEST", cfg(-10.0), next);
+        q.restore(snap);
+        q.tick();
+        assert!(!q.is_session_halted(), "stale day must roll over to fresh");
+        assert_eq!(q.trades, 0);
+        assert!(q.net_pnl().abs() < 1e-9);
     }
 }
