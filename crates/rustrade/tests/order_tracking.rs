@@ -46,6 +46,7 @@ struct TrackingExchange {
     open: Mutex<Vec<OpenOrder>>,
     cancels: Arc<Mutex<Vec<String>>>,
     next_id: Mutex<u64>,
+    placed: Arc<std::sync::atomic::AtomicU64>,
 }
 impl TrackingExchange {
     fn new() -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
@@ -55,9 +56,14 @@ impl TrackingExchange {
                 open: Mutex::new(Vec::new()),
                 cancels: cancels.clone(),
                 next_id: Mutex::new(0),
+                placed: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             }),
             cancels,
         )
+    }
+    /// Shared counter of `place_order` calls, for the test to poll on.
+    fn placed_count(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.placed.clone()
     }
 }
 #[async_trait]
@@ -66,6 +72,8 @@ impl ExchangeClient for TrackingExchange {
         "tracking"
     }
     async fn place_order(&self, o: &Order) -> Result<String> {
+        self.placed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut n = self.next_id.lock().unwrap();
         *n += 1;
         let id = format!("ord-{n}");
@@ -132,6 +140,25 @@ fn candle_event(symbol: &str, close: f64) -> MarketDataEvent {
     }
 }
 
+/// Poll `cond` every 25ms until it returns true or `secs` elapses; returns
+/// whether it became true. Robust to slow CI: a loaded runner just waits
+/// longer instead of failing on a fixed sleep.
+async fn eventually<F>(secs: u64, mut cond: F) -> bool
+where
+    F: FnMut() -> bool,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        if cond() {
+            return true;
+        }
+        if tokio::time::Instant::now() > deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn reaper_cancels_stale_resting_order_end_to_end() {
     let (exchange, cancels) = TrackingExchange::new();
@@ -158,26 +185,33 @@ async fn reaper_cancels_stale_resting_order_end_to_end() {
 
     let handle = bot.handle();
     let bus = bot.market_data_bus().clone();
+    let placed = exchange.placed_count();
     let task = tokio::spawn(async move { bot.run_until_shutdown().await });
 
-    // Let services start, then publish a candle so the brain places its limit.
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    bus.publish(candle_event("BTCUSDT", 100.0));
-
-    // Wait for the reaper to cancel the stale order.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        if !cancels.lock().unwrap().is_empty() || tokio::time::Instant::now() > deadline {
-            break;
+    // Publish candles until the brain's limit order actually lands. A single
+    // fixed-delay publish can race service startup on a slow runner: the
+    // broadcast bus drops events with no subscriber yet, so the candle is
+    // lost and no order is placed. Re-publishing until `place_order` fired
+    // removes that timing dependence. (The brain places at most one order;
+    // extra candles are held.)
+    let order_placed = eventually(10, || {
+        placed.load(std::sync::atomic::Ordering::SeqCst) >= 1 || {
+            bus.publish(candle_event("BTCUSDT", 100.0));
+            false
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await;
+    assert!(order_placed, "brain never placed its limit order");
+
+    // Then wait for the reaper to cancel the stale order.
+    let cancelled_ok = eventually(10, || !cancels.lock().unwrap().is_empty()).await;
+    assert!(cancelled_ok, "reaper never cancelled the stale order");
 
     let cancelled = cancels.lock().unwrap().clone();
     assert_eq!(
         cancelled.len(),
         1,
-        "reaper should cancel the one stale order"
+        "reaper should cancel exactly the one stale order"
     );
     assert_eq!(cancelled[0], "ord-1");
 
@@ -195,14 +229,18 @@ async fn reaper_cancels_stale_resting_order_end_to_end() {
 #[tokio::test(flavor = "multi_thread")]
 async fn no_tracking_without_capability() {
     // Same brain, but an adapter WITHOUT OrderTracking → nothing is tracked
-    // and nothing is cancelled even though a limit order was placed.
-    struct PlainExchange;
+    // even though a limit order is placed.
+    struct PlainExchange {
+        placed: Arc<std::sync::atomic::AtomicU64>,
+    }
     #[async_trait]
     impl ExchangeClient for PlainExchange {
         fn name(&self) -> &str {
             "plain"
         }
         async fn place_order(&self, _o: &Order) -> Result<String> {
+            self.placed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok("id".into())
         }
         async fn cancel_all(&self, _s: &Symbol) -> Result<usize> {
@@ -220,6 +258,7 @@ async fn no_tracking_without_capability() {
         // supports() defaults to false for everything, incl. OrderTracking.
     }
 
+    let placed = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let bot = Bot::new(
         BotConfig::builder()
             .name("no-track")
@@ -233,7 +272,9 @@ async fn no_tracking_without_capability() {
             })
             .build()
             .unwrap(),
-        Arc::new(PlainExchange),
+        Arc::new(PlainExchange {
+            placed: placed.clone(),
+        }),
         vec![OneLimitBrain::new()],
     )
     .unwrap()
@@ -243,9 +284,17 @@ async fn no_tracking_without_capability() {
     let bus = bot.market_data_bus().clone();
     let task = tokio::spawn(async move { bot.run_until_shutdown().await });
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    bus.publish(candle_event("BTCUSDT", 100.0));
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Drive candles until the order is actually placed (proves the brain
+    // fired), so the "nothing tracked" assertion is meaningful rather than
+    // racing startup.
+    let order_placed = eventually(10, || {
+        placed.load(std::sync::atomic::Ordering::SeqCst) >= 1 || {
+            bus.publish(candle_event("BTCUSDT", 100.0));
+            false
+        }
+    })
+    .await;
+    assert!(order_placed, "brain never placed its limit order");
 
     // Adapter can't track, so the execution service never recorded the order.
     assert!(
