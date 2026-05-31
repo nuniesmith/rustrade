@@ -44,6 +44,10 @@ pub(crate) struct ExecutionContext {
     pub positions: PositionCache,
     pub risk: RiskStateMap,
     pub sizing: Arc<SizingConfig>,
+    /// Set when order tracking is wired (`Bot::with_order_tracking`) and the
+    /// adapter advertises `Capability::OrderTracking`. Resting orders the
+    /// service places are recorded here so the reaper can age them out.
+    pub order_tracker: Option<crate::order_tracker::OrderTracker>,
 }
 
 /// Per-brain execution loop with full risk gating + order placement.
@@ -163,6 +167,11 @@ impl ExecutionService {
         match self.ctx.exchange.place_order(&order).await {
             Ok(id) => {
                 self.orders_placed.fetch_add(1, Ordering::Relaxed);
+                // Track resting orders so the reaper can age them out. The
+                // tracker itself ignores market orders (they never rest).
+                if let Some(tracker) = &self.ctx.order_tracker {
+                    tracker.record(id.clone(), &order).await;
+                }
                 tracing::info!(
                     service = %self.name,
                     symbol = %symbol,

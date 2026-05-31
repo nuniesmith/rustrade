@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustrade_core::{
-    Brain, CandleSource, Error, ExchangeClient, FillSource, MarketDataBus, MarketSource,
-    MetricsSink, NoopSink, Position, Result, SignalBus, StateStore, Symbol,
+    Brain, CandleSource, Capability, Error, ExchangeClient, FillSource, MarketDataBus,
+    MarketSource, MetricsSink, NoopSink, Position, Result, SignalBus, StateStore, Symbol,
 };
 use rustrade_risk::{CircuitBreakerConfig, SessionPnlConfig, SizingConfig};
 use rustrade_supervisor::{Supervisor, SupervisorConfig};
@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::execution::{ExecutionContext, ExecutionService};
 use crate::handle::BotHandle;
+use crate::order_tracker::{OrderReaperService, OrderTracker};
 use crate::risk_state::{
     PositionCache, RiskPersister, RiskStateMap, build_position_cache, build_risk_state,
 };
@@ -311,6 +312,14 @@ pub struct Bot {
     market_source: Option<Arc<dyn MarketSource>>,
     fill_source: Option<Arc<dyn FillSource>>,
     candle_pollers: Vec<CandlePollerSpec>,
+    order_tracker: OrderTracker,
+    order_tracking: Option<OrderTrackingSpec>,
+}
+
+/// Settings captured by `Bot::with_order_tracking`.
+struct OrderTrackingSpec {
+    ttl: Duration,
+    poll_cadence: Duration,
 }
 
 /// One registered `(symbol, interval, cadence)` for `Bot::with_candle_poller`.
@@ -362,6 +371,7 @@ impl Bot {
 
         let brains = Arc::new(brains);
         let persister_slot: crate::handle::PersisterSlot = Arc::new(std::sync::OnceLock::new());
+        let order_tracker = OrderTracker::new();
         let handle = BotHandle::new(
             supervisor.clone(),
             brains.clone(),
@@ -369,6 +379,7 @@ impl Bot {
             positions.clone(),
             signal_bus.clone(),
             persister_slot.clone(),
+            order_tracker.clone(),
         );
 
         Ok(Self {
@@ -383,11 +394,13 @@ impl Bot {
             metrics: Arc::new(NoopSink),
             state_store: None,
             persister_slot,
+            order_tracker,
             handle,
             external_cancel: None,
             market_source: None,
             fill_source: None,
             candle_pollers: Vec::new(),
+            order_tracking: None,
         })
     }
 
@@ -421,6 +434,27 @@ impl Bot {
     /// distinct bots can share one backend without collision.
     pub fn with_state_store(mut self, store: Arc<dyn StateStore>) -> Self {
         self.state_store = Some(store);
+        self
+    }
+
+    /// Enable resting-order lifecycle tracking.
+    ///
+    /// The [`ExecutionService`] records every resting order it places (limit
+    /// / post-only / IOC / FOK — market orders never rest, so they're
+    /// skipped), and a supervised [`OrderReaperService`] periodically:
+    ///
+    /// - **reconciles** the tracker against `exchange.get_open_orders` (so
+    ///   orders filled or cancelled out-of-band stop being tracked), and
+    /// - **cancels** any resting order older than `ttl` via
+    ///   `exchange.cancel_order`.
+    ///
+    /// `poll_cadence` is how often a sweep runs. The reaper is only spawned
+    /// if the adapter advertises [`Capability::OrderTracking`]; otherwise the
+    /// call is a no-op (with a warning at startup), since the framework can't
+    /// list or cancel orders without it. Live tracked orders are visible via
+    /// [`BotHandle::tracked_orders`](crate::BotHandle::tracked_orders).
+    pub fn with_order_tracking(mut self, ttl: Duration, poll_cadence: Duration) -> Self {
+        self.order_tracking = Some(OrderTrackingSpec { ttl, poll_cadence });
         self
     }
 
@@ -567,6 +601,19 @@ impl Bot {
             let _ = self.persister_slot.set(p.clone());
         }
 
+        // Order tracking: only active when wired AND the adapter can list +
+        // cancel orders. Gate once here so both the execution service (which
+        // records resting orders) and the reaper agree.
+        let order_tracking_active =
+            self.order_tracking.is_some() && self.exchange.supports(Capability::OrderTracking);
+        if self.order_tracking.is_some() && !order_tracking_active {
+            tracing::warn!(
+                exchange = %self.exchange.name(),
+                "order tracking requested but adapter lacks Capability::OrderTracking — \
+                 resting orders will NOT be tracked or aged out"
+            );
+        }
+
         let sizing = Arc::new(self.config.risk.sizing.clone());
         let ctx = ExecutionContext {
             exchange: self.exchange.clone(),
@@ -575,11 +622,26 @@ impl Bot {
             positions: self.positions.clone(),
             risk: self.risk.clone(),
             sizing,
+            order_tracker: order_tracking_active.then(|| self.order_tracker.clone()),
         };
 
         for brain in self.brains.iter() {
             let svc = ExecutionService::new(brain.clone(), ctx.clone());
             self.supervisor.spawn_service(Box::new(svc));
+        }
+
+        if order_tracking_active {
+            // Safe: order_tracking_active implies order_tracking is Some.
+            let spec = self.order_tracking.as_ref().unwrap();
+            self.supervisor
+                .spawn_service(Box::new(OrderReaperService::new(
+                    self.exchange.clone(),
+                    self.order_tracker.clone(),
+                    self.config.symbols.clone(),
+                    spec.ttl,
+                    spec.poll_cadence,
+                    self.metrics.clone(),
+                )));
         }
 
         if let Some(source) = self.market_source.clone() {

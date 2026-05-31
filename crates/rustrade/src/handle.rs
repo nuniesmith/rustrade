@@ -104,6 +104,7 @@ pub struct BotHandle {
     positions: PositionCache,
     signals: SignalBus,
     persister: PersisterSlot,
+    order_tracker: crate::order_tracker::OrderTracker,
 }
 
 impl BotHandle {
@@ -114,6 +115,7 @@ impl BotHandle {
         positions: PositionCache,
         signals: SignalBus,
         persister: PersisterSlot,
+        order_tracker: crate::order_tracker::OrderTracker,
     ) -> Self {
         Self {
             cancel: supervisor.cancel_token().clone(),
@@ -123,7 +125,18 @@ impl BotHandle {
             positions,
             signals,
             persister,
+            order_tracker,
         }
+    }
+
+    /// Snapshot of the resting orders the framework is currently tracking.
+    ///
+    /// Empty unless order tracking is wired via
+    /// [`Bot::with_order_tracking`](crate::Bot::with_order_tracking) and the
+    /// adapter advertises
+    /// [`Capability::OrderTracking`](rustrade_core::Capability::OrderTracking).
+    pub async fn tracked_orders(&self) -> Vec<crate::order_tracker::TrackedOrder> {
+        self.order_tracker.snapshot().await
     }
 
     /// Trigger a graceful shutdown. Fire-and-forget; idempotent.
