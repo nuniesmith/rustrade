@@ -51,7 +51,7 @@ exclude = ["fuzz"]
 resolver = "3"
 
 [workspace.package]
-version      = "0.0.3"
+version      = "0.2.0"
 edition      = "2024"
 authors      = ["nuniesmith"]
 license      = "MIT"
@@ -89,12 +89,14 @@ rand = "0.10"
 # Property-based testing (dev-only in downstream crates)
 proptest = "1"
 
-# Internal
-rustrade            = { path = "crates/rustrade",            version = "0.1.0" }
-rustrade-backtest   = { path = "crates/rustrade-backtest",   version = "0.1.0" }
-rustrade-core       = { path = "crates/rustrade-core",       version = "0.1.0" }
-rustrade-risk       = { path = "crates/rustrade-risk",       version = "0.1.0" }
-rustrade-supervisor = { path = "crates/rustrade-supervisor", version = "0.1.0" }
+# Internal — `version` must track [workspace.package].version above so a
+# `cargo publish` resolves each path dependency to its just-bumped sibling.
+# Keep all five in lockstep with the workspace version on every release.
+rustrade            = { path = "crates/rustrade",            version = "0.2.0" }
+rustrade-backtest   = { path = "crates/rustrade-backtest",   version = "0.2.0" }
+rustrade-core       = { path = "crates/rustrade-core",       version = "0.2.0" }
+rustrade-risk       = { path = "crates/rustrade-risk",       version = "0.2.0" }
+rustrade-supervisor = { path = "crates/rustrade-supervisor", version = "0.2.0" }
 
 # ============================================================================
 # Profiles
