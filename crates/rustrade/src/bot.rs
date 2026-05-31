@@ -614,6 +614,18 @@ impl Bot {
             );
         }
 
+        // Bracket (SL+TP / OCO) orders need three things: place protective
+        // stops (StopOrders), cancel the sibling on fill (OrderTracking), and
+        // detect that fill (a fill source). When all hold, a shared OCO
+        // registry links each bracket's legs; otherwise a brain emitting both
+        // SL+TP falls back to a single attached stop-loss (see
+        // `ExecutionService::attach_protection`).
+        let brackets_active = self.exchange.supports(Capability::StopOrders)
+            && self.exchange.supports(Capability::OrderTracking)
+            && self.fill_source.is_some();
+        let oco = brackets_active.then(crate::order_tracker::OcoRegistry::new);
+        tracing::info!(brackets_active, "bracket (SL+TP/OCO) support");
+
         let sizing = Arc::new(self.config.risk.sizing.clone());
         let ctx = ExecutionContext {
             exchange: self.exchange.clone(),
@@ -623,6 +635,7 @@ impl Bot {
             risk: self.risk.clone(),
             sizing,
             order_tracker: order_tracking_active.then(|| self.order_tracker.clone()),
+            oco: oco.clone(),
         };
 
         for brain in self.brains.iter() {
@@ -659,6 +672,7 @@ impl Bot {
                     self.risk.clone(),
                     self.metrics.clone(),
                     persister.clone(),
+                    oco.clone(),
                 )));
         }
 

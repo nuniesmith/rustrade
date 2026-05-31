@@ -48,6 +48,12 @@ pub(crate) struct ExecutionContext {
     /// adapter advertises `Capability::OrderTracking`. Resting orders the
     /// service places are recorded here so the reaper can age them out.
     pub order_tracker: Option<crate::order_tracker::OrderTracker>,
+    /// Set when bracket (SL+TP / OCO) orders are active — the adapter
+    /// supports `StopOrders` + `OrderTracking` and a fill source is wired.
+    /// A market entry carrying both `stop_price` and `take_profit_price`
+    /// then gets two reduce-only protective orders registered as an OCO
+    /// pair here; the `FillRoutingService` cancels the sibling on fill.
+    pub oco: Option<crate::order_tracker::OcoRegistry>,
 }
 
 /// Per-brain execution loop with full risk gating + order placement.
@@ -181,6 +187,14 @@ impl ExecutionService {
                     order_id = %id,
                     "order placed"
                 );
+                // Bracket entry: place the SL + TP protective legs now that
+                // the market entry is accepted.
+                if self.is_bracket(&decision, order.kind)
+                    && let (Some(sl), Some(tp)) = (decision.stop_price, decision.take_profit_price)
+                {
+                    self.place_brackets(&symbol, order.side, order.size, sl, tp)
+                        .await;
+                }
             }
             Err(e) => {
                 tracing::error!(
@@ -282,32 +296,110 @@ impl ExecutionService {
                     }
                 };
 
-                // ── Attach protective stop / take-profit if requested ──
-                Some(self.attach_protection(order, symbol, decision))
+                // ── Protective handling ───────────────────────────────
+                // When a full bracket applies (both SL+TP, market entry,
+                // OCO active), the entry stays clean — the two protective
+                // orders are placed separately after the entry fills (see
+                // `place_brackets`). Otherwise attach a single stop/TP (or
+                // fall back / warn) as in 0.2b.
+                if self.is_bracket(decision, order.kind) {
+                    Some(order)
+                } else {
+                    Some(self.attach_protection(order, symbol, decision))
+                }
             }
         }
     }
 
-    /// Attach a protective [`StopAttachment`] derived from
-    /// `decision.stop_price` / `take_profit_price`, gated on
-    /// [`Capability::StopOrders`].
+    /// Does this decision warrant a full SL+TP bracket placed as two
+    /// separate OCO orders? Requires both prices, a market entry, and an
+    /// active OCO registry (which `Bot` only sets when the adapter supports
+    /// `StopOrders` + `OrderTracking` and a fill source is wired).
+    fn is_bracket(&self, decision: &Decision, kind: OrderKind) -> bool {
+        self.ctx.oco.is_some()
+            && matches!(kind, OrderKind::Market)
+            && decision.stop_price.is_some()
+            && decision.take_profit_price.is_some()
+    }
+
+    /// Place the two reduce-only protective legs for a bracket entry and
+    /// register them as an OCO pair. Called after the market entry is
+    /// accepted. Best-effort: if the second leg fails to place, the first is
+    /// cancelled so no orphaned protective order is left resting.
+    async fn place_brackets(
+        &self,
+        symbol: &Symbol,
+        entry_side: Side,
+        size: Volume,
+        sl: Price,
+        tp: Price,
+    ) {
+        let Some(oco) = &self.ctx.oco else { return };
+        let close_side = entry_side.opposite();
+        let sl_order = Order::market(symbol.clone(), close_side, size)
+            .with_reduce_only(true)
+            .with_stop(StopAttachment::stop_market(sl));
+        let tp_order = Order::market(symbol.clone(), close_side, size)
+            .with_reduce_only(true)
+            .with_stop(StopAttachment::take_profit(tp));
+
+        let sl_id = match self.ctx.exchange.place_order(&sl_order).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(service = %self.name, symbol = %symbol, error = %e, "bracket: stop-loss leg failed to place; entry is UNPROTECTED");
+                return;
+            }
+        };
+        let tp_id = match self.ctx.exchange.place_order(&tp_order).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(service = %self.name, symbol = %symbol, error = %e, "bracket: take-profit leg failed; cancelling the stop-loss leg to avoid an orphan");
+                let _ = self.ctx.exchange.cancel_order(symbol, &sl_id).await;
+                return;
+            }
+        };
+
+        oco.register(symbol.clone(), sl_id.clone(), tp_id.clone())
+            .await;
+        if let Some(tracker) = &self.ctx.order_tracker {
+            tracker.record(sl_id.clone(), &sl_order).await;
+            tracker.record(tp_id.clone(), &tp_order).await;
+        }
+        self.orders_placed.fetch_add(2, Ordering::Relaxed);
+        tracing::info!(
+            service = %self.name,
+            symbol = %symbol,
+            close_side = ?close_side,
+            stop = sl.value(),
+            take_profit = tp.value(),
+            sl_id = %sl_id,
+            tp_id = %tp_id,
+            "bracket placed (SL + TP, OCO-linked)"
+        );
+    }
+
+    /// Attach a **single** protective [`StopAttachment`] to the entry order,
+    /// gated on [`Capability::StopOrders`]. This is the fallback path used
+    /// when a full bracket doesn't apply — i.e. only one of SL/TP is set, the
+    /// entry is a limit order, or bracket prerequisites aren't met (no fill
+    /// source, or the adapter lacks `StopOrders`/`OrderTracking`).
     ///
-    /// The current [`Order`] model carries a single attachment, so a full
-    /// bracket (stop-loss **and** take-profit on one order) can't be
-    /// expressed yet — stop-loss takes priority and the take-profit is
-    /// logged as dropped. Simultaneous SL+TP (OCO / bracket) is a follow-up
-    /// once the order tracker (0.2c) can manage paired orders. When the
-    /// adapter lacks `StopOrders`, the order is placed **without**
-    /// protection and a warning is emitted (never silently dropped) — a
-    /// brain that requires stops can introspect `supports` itself.
+    /// When *both* SL and TP are set but brackets are inactive, the single
+    /// `Order.stop` field can only carry one, so the protective **stop-loss**
+    /// takes priority and the take-profit is logged as dropped — full SL+TP
+    /// is handled by [`Self::place_brackets`] when brackets are active. When
+    /// the adapter lacks `StopOrders`, the order is placed **without**
+    /// protection and a warning is emitted (never silently dropped) — a brain
+    /// that requires stops can introspect `supports` itself.
     fn attach_protection(&self, order: Order, symbol: &Symbol, decision: &Decision) -> Order {
         let stop = match (decision.stop_price, decision.take_profit_price) {
             (Some(sl), Some(_tp)) => {
                 tracing::warn!(
                     service = %self.name,
                     symbol = %symbol,
-                    "both stop_price and take_profit_price set; attaching stop-loss only \
-                     (bracket / OCO awaits the order tracker)"
+                    "both stop_price and take_profit_price set but brackets inactive \
+                     (needs StopOrders + OrderTracking + a fill source); attaching \
+                     stop-loss only"
                 );
                 StopAttachment::stop_market(sl)
             }

@@ -96,6 +96,69 @@ impl OrderTracker {
     }
 }
 
+/// One-cancels-other registry for bracket (SL + TP) protective pairs.
+///
+/// When a brain emits both `stop_price` and `take_profit_price`, the
+/// [`ExecutionService`](crate::execution::ExecutionService) places two
+/// reduce-only protective orders and registers them here. When either one
+/// fills, the [`FillRoutingService`](crate::FillRoutingService) cancels the
+/// sibling so the position is never closed twice.
+///
+/// Cheaply cloneable; both directions of each pair are stored so a fill on
+/// either leg finds its sibling.
+#[derive(Clone, Default)]
+pub struct OcoRegistry {
+    inner: Arc<RwLock<HashMap<String, OcoEntry>>>,
+}
+
+#[derive(Clone)]
+struct OcoEntry {
+    sibling: String,
+    symbol: Symbol,
+}
+
+impl OcoRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a protective pair `(a, b)` for `symbol`. A fill on either
+    /// id will then yield the other via [`Self::take_sibling`].
+    pub(crate) async fn register(&self, symbol: Symbol, a: String, b: String) {
+        let mut map = self.inner.write().await;
+        map.insert(
+            a.clone(),
+            OcoEntry {
+                sibling: b.clone(),
+                symbol: symbol.clone(),
+            },
+        );
+        map.insert(b, OcoEntry { sibling: a, symbol });
+    }
+
+    /// If `order_id` is part of a registered pair, remove **both** legs and
+    /// return the sibling's `(symbol, order_id)` to cancel. Idempotent: a
+    /// second call for either leg returns `None`.
+    pub(crate) async fn take_sibling(&self, order_id: &str) -> Option<(Symbol, String)> {
+        let mut map = self.inner.write().await;
+        let entry = map.remove(order_id)?;
+        // Drop the reverse mapping too so the sibling's own fill is a no-op.
+        map.remove(&entry.sibling);
+        Some((entry.symbol, entry.sibling))
+    }
+
+    /// Number of individual legs currently registered (2 per live pair).
+    pub async fn len(&self) -> usize {
+        self.inner.read().await.len()
+    }
+
+    /// `true` when no pairs are registered.
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.is_empty()
+    }
+}
+
 /// Supervised service that reconciles tracked orders against the exchange
 /// and cancels any that outlive the configured TTL.
 ///
@@ -406,5 +469,37 @@ mod tests {
             ex.cancels.lock().unwrap().as_slice(),
             &["stale".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn oco_register_and_take_sibling_is_symmetric() {
+        let oco = OcoRegistry::new();
+        let sym = Symbol::from("BTCUSDT");
+        oco.register(sym.clone(), "sl".into(), "tp".into()).await;
+        assert_eq!(oco.len().await, 2);
+
+        // A fill on the SL leg yields the TP sibling and clears both legs.
+        let sib = oco.take_sibling("sl").await;
+        assert_eq!(sib, Some((sym, "tp".to_string())));
+        assert!(oco.is_empty().await, "both legs cleared after one fills");
+
+        // The sibling's own (later) fill is now a no-op.
+        assert!(oco.take_sibling("tp").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn oco_take_sibling_from_either_leg() {
+        let oco = OcoRegistry::new();
+        let sym = Symbol::from("ETHUSDT");
+        oco.register(sym.clone(), "a".into(), "b".into()).await;
+        // Filling the TP leg ("b") yields the SL leg ("a").
+        assert_eq!(oco.take_sibling("b").await, Some((sym, "a".to_string())));
+        assert!(oco.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn oco_unknown_id_is_none() {
+        let oco = OcoRegistry::new();
+        assert!(oco.take_sibling("nope").await.is_none());
     }
 }
