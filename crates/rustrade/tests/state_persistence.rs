@@ -77,11 +77,10 @@ async fn risk_state_survives_restart_via_shared_store() {
     let handle1 = bot1.handle();
     let task1 = tokio::spawn(async move { bot1.run_until_shutdown().await });
 
-    // Let startup (restore + service spawn) settle, then record a loss big
-    // enough to breach the -10 session cap and the 1-loss breaker.
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
+    // No startup settle needed: record_trade_outcome writes the shared risk
+    // map directly, and the awaited task1.await after shutdown guarantees the
+    // bot's persist_all ran (writing the snapshot) before we assert on it.
+    // (A fixed yield count here would be fragile on a slow CI runner.)
     handle1.record_trade_outcome(&sym, -50.0, 1.0).await;
 
     handle1.shutdown();
@@ -100,9 +99,9 @@ async fn risk_state_survives_restart_via_shared_store() {
     let handle2 = bot2.handle();
     let task2 = tokio::spawn(async move { bot2.run_until_shutdown().await });
 
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
+    // bot2 restores synchronously at startup and re-persists on shutdown; the
+    // awaited task2.await guarantees that completes before the final store
+    // assertion below, so no startup settle is needed here either.
     assert!(handle2.health().await.healthy, "healthy after restore");
 
     handle2.shutdown();
