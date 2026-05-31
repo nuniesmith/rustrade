@@ -709,6 +709,7 @@ dependencies = [
  "rustrade-core",
  "rustrade-risk",
  "rustrade-supervisor",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

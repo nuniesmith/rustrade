@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use rustrade_core::{
     Brain, CandleSource, Error, ExchangeClient, FillSource, MarketDataBus, MarketSource,
-    MetricsSink, NoopSink, Position, Result, SignalBus, Symbol,
+    MetricsSink, NoopSink, Position, Result, SignalBus, StateStore, Symbol,
 };
 use rustrade_risk::{CircuitBreakerConfig, SessionPnlConfig, SizingConfig};
 use rustrade_supervisor::{Supervisor, SupervisorConfig};
@@ -17,7 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::execution::{ExecutionContext, ExecutionService};
 use crate::handle::BotHandle;
-use crate::risk_state::{PositionCache, RiskStateMap, build_position_cache, build_risk_state};
+use crate::risk_state::{
+    PositionCache, RiskPersister, RiskStateMap, build_position_cache, build_risk_state,
+};
 use crate::services::{CandlePollerService, FillRoutingService, MarketFeedService};
 
 const DEFAULT_MARKET_BUS_CAPACITY: usize = 1024;
@@ -302,6 +304,8 @@ pub struct Bot {
     positions: PositionCache,
     risk: RiskStateMap,
     metrics: Arc<dyn MetricsSink>,
+    state_store: Option<Arc<dyn StateStore>>,
+    persister_slot: crate::handle::PersisterSlot,
     handle: BotHandle,
     external_cancel: Option<CancellationToken>,
     market_source: Option<Arc<dyn MarketSource>>,
@@ -357,12 +361,14 @@ impl Bot {
         );
 
         let brains = Arc::new(brains);
+        let persister_slot: crate::handle::PersisterSlot = Arc::new(std::sync::OnceLock::new());
         let handle = BotHandle::new(
             supervisor.clone(),
             brains.clone(),
             risk.clone(),
             positions.clone(),
             signal_bus.clone(),
+            persister_slot.clone(),
         );
 
         Ok(Self {
@@ -375,6 +381,8 @@ impl Bot {
             positions,
             risk,
             metrics: Arc::new(NoopSink),
+            state_store: None,
+            persister_slot,
             handle,
             external_cancel: None,
             market_source: None,
@@ -388,6 +396,31 @@ impl Bot {
     /// the default is [`NoopSink`], which discards everything.
     pub fn with_metrics(mut self, sink: Arc<dyn MetricsSink>) -> Self {
         self.metrics = sink;
+        self
+    }
+
+    /// Install a [`StateStore`] so per-symbol risk state (session PnL and
+    /// circuit breaker) survives restarts.
+    ///
+    /// Without a store, risk state is in-memory only: a crash mid-session
+    /// resets the daily drawdown cap and the loss-streak breaker. With one
+    /// wired, the bot:
+    ///
+    /// - **Restores** each symbol's snapshot on startup, then applies the
+    ///   stale-snapshot policy — a session from an earlier UTC day rolls
+    ///   over to fresh, and a breaker whose cooldown elapsed during
+    ///   downtime auto-resets.
+    /// - **Persists** after every realised trade (whether fed via
+    ///   [`BotHandle::record_trade_outcome`](crate::BotHandle::record_trade_outcome)
+    ///   or auto-routed by the `FillRoutingService`).
+    /// - **Flushes** on graceful shutdown.
+    ///
+    /// Use [`rustrade_core::InMemoryStore`] for a non-durable default, or a
+    /// disk-/database-backed implementation from a downstream crate for
+    /// real durability. Snapshots are keyed by `(bot name, symbol)`, so
+    /// distinct bots can share one backend without collision.
+    pub fn with_state_store(mut self, store: Arc<dyn StateStore>) -> Self {
+        self.state_store = Some(store);
         self
     }
 
@@ -521,6 +554,19 @@ impl Bot {
         // Best-effort position prefetch — failures don't block startup.
         self.prefetch_positions().await;
 
+        // Restore persisted risk state (if a store is wired) before any
+        // service runs, then publish the persister so the per-trade paths
+        // can save through it.
+        let persister = self
+            .state_store
+            .clone()
+            .map(|store| RiskPersister::new(store, self.config.name.clone()));
+        if let Some(p) = &persister {
+            p.restore_into(&self.risk).await;
+            // OnceLock: set is infallible the first (only) time per bot.
+            let _ = self.persister_slot.set(p.clone());
+        }
+
         let sizing = Arc::new(self.config.risk.sizing.clone());
         let ctx = ExecutionContext {
             exchange: self.exchange.clone(),
@@ -550,6 +596,7 @@ impl Bot {
                     self.positions.clone(),
                     self.risk.clone(),
                     self.metrics.clone(),
+                    persister.clone(),
                 )));
         }
 
@@ -581,6 +628,12 @@ impl Bot {
 
         if self.config.close_positions_on_shutdown {
             self.close_open_positions().await;
+        }
+
+        // Persist final risk state + flush before exit so the next boot
+        // restores an up-to-date snapshot.
+        if let Some(p) = &persister {
+            p.persist_all(&self.risk).await;
         }
 
         for brain in self.brains.iter() {

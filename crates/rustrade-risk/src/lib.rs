@@ -20,7 +20,7 @@ pub mod clock;
 pub mod session_pnl;
 pub mod sizing;
 
-pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerSnapshot};
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use session_pnl::{SessionPnl, SessionPnlConfig};
+pub use session_pnl::{SessionPnl, SessionPnlConfig, SessionPnlSnapshot};
 pub use sizing::{PositionSizer, SizingConfig};
