@@ -75,9 +75,11 @@ on MSRV (1.94.1) + stable.
       **gross-exposure cap**, **max concurrent positions** — checked in the
       execution pre-trade gate. *(Shipped.)* Remaining: net-exposure + an explicit
       buying-power budget (needs a cached account balance).
-- [ ] **Per-asset-class `RiskConfig` presets** (crypto-perp / spot / FX / futures):
-      different leverage/stop/size rules per class, keyed off `InstrumentSpec`
-      (now that `AssetClass` exists). *(Track 2.3 — next.)*
+- [x] **Per-asset-class `RiskConfig` presets** (crypto-perp / spot / FX / futures):
+      `RiskConfig::{crypto_perp,crypto_spot,fx,futures,equity,preset_for}` presets +
+      `BotConfig::per_class_risk` (`BotConfigBuilder::class_risk`), resolved
+      per-symbol → per-class (by `instrument_spec().asset_class`) → default for
+      both gates and sizing. *(Shipped — Track 2.3.)*
 - [x] **Wire `SessionPnl::tick()` / `CircuitBreaker::tick()` into a periodic
       sweep.** `RiskSweepService` ticks per-symbol + portfolio risk on a cadence
       so the daily halt rolls over at UTC midnight in a live run. *(Shipped.)*
@@ -158,9 +160,17 @@ multipliers, parameter overrides) are all resolved in code — see the
   the min-notional, and snaps limit prices to the tick (all no-ops under the
   permissive default, so existing adapters are unaffected). The foundation for
   class-aware rules.
+- **Per-asset-class risk presets** (`rustrade` facade): `RiskConfig` presets per
+  `AssetClass` (`crypto_perp` / `crypto_spot` / `fx` / `futures` / `equity` /
+  `preset_for`) + `BotConfig::per_class_risk` (`BotConfigBuilder::class_risk`).
+  Each symbol resolves its effective `RiskConfig` (gates **and** sizing)
+  per-symbol → per-class (keyed off `instrument_spec().asset_class`) → default,
+  so one bot trades crypto-perps / FX / futures side by side with class-correct
+  leverage and limits.
 
 > These land the framework side of the FKS multi-asset risk roadmap (Track 2.1,
-> 2.2, 2.4). Bots consume them once a new `rustrade-framework` is published.
+> 2.2, 2.3, 2.4) — the **class-aware risk layer is now complete**. Bots consume
+> it once a new `rustrade-framework` is published.
 
 ---
 
