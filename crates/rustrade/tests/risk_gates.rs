@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rustrade::{
     Bot, BotConfig, Brain, Candle, CircuitBreakerConfig, Decision, Exchange, ExchangeClient,
-    MarketDataEvent, Order, Position, Result, SessionPnlConfig, SignalType, SizingConfig, Symbol,
+    MarketDataEvent, Order, PortfolioRiskConfig, Position, Result, SessionPnlConfig, SignalType,
+    SizingConfig, Symbol,
 };
 
 // ── Fixtures ────────────────────────────────────────────────────────────
@@ -253,6 +254,115 @@ async fn circuit_breaker_blocks_buy_order() {
         placed.load(Ordering::SeqCst),
         0,
         "tripped circuit breaker must block buy orders"
+    );
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn portfolio_daily_loss_halt_blocks_buy_order() {
+    let brain = Arc::new(FixedSignalBrain {
+        signal: SignalType::Buy,
+    });
+    let (exchange, placed, _closed) = CountingExchange::new();
+    let bot = Bot::new(
+        BotConfig::builder()
+            .name("pf-halt")
+            .symbol("BTCUSDT")
+            .without_signal_handler()
+            .shutdown_timeout(Duration::from_secs(2))
+            // Per-symbol caps stay loose so ONLY the account gate can block.
+            .session_pnl_config(SessionPnlConfig {
+                loss_limit: -10_000.0,
+            })
+            .portfolio_config(PortfolioRiskConfig {
+                max_daily_loss: -1.0,
+                ..Default::default()
+            })
+            .build()
+            .unwrap(),
+        exchange,
+        vec![brain],
+    )
+    .unwrap();
+
+    let handle = bot.handle();
+    // -10 net on the only symbol → account net -10 ≤ -1 → portfolio halt
+    // (the per-symbol session, capped at -10_000, is NOT halted).
+    handle
+        .record_trade_outcome(&Symbol::from("BTCUSDT"), -10.0, 0.0)
+        .await;
+
+    let bus = bot.market_data_bus().clone();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    bus.publish(candle_event("BTCUSDT", 100.0));
+    bus.publish(candle_event("BTCUSDT", 100.0));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        placed.load(Ordering::SeqCst),
+        0,
+        "account daily-loss halt must block every buy"
+    );
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn portfolio_max_concurrent_blocks_new_symbol() {
+    let brain = Arc::new(FixedSignalBrain {
+        signal: SignalType::Buy,
+    });
+    let (exchange, placed, _closed) = CountingExchange::new();
+    // BTC already holds a position → consumes the single concurrency slot.
+    exchange.set_position(
+        Symbol::from("BTCUSDT"),
+        Position {
+            qty: 1.0,
+            entry_price: Some(100.0),
+            unrealised_pnl: 0.0,
+        },
+    );
+
+    let bot = Bot::new(
+        BotConfig::builder()
+            .name("pf-concurrent")
+            .symbols(["BTCUSDT", "ETHUSDT"])
+            .without_signal_handler()
+            .shutdown_timeout(Duration::from_secs(2))
+            // margin 100 × 1x at price 100, cv 1 ⇒ 1 contract (passes the sizer).
+            .sizing_config(SizingConfig {
+                margin_per_trade: 100.0,
+                leverage: 1,
+                max_contracts: 10,
+            })
+            .portfolio_config(PortfolioRiskConfig {
+                max_concurrent_positions: 1,
+                ..Default::default()
+            })
+            .build()
+            .unwrap(),
+        exchange,
+        vec![brain],
+    )
+    .unwrap();
+
+    let handle = bot.handle();
+    let bus = bot.market_data_bus().clone();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+    // Allow the startup position prefetch to load BTC into the cache.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    // ETH is a NEW symbol; the one allowed slot is taken by BTC.
+    bus.publish(candle_event("ETHUSDT", 100.0));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        placed.load(Ordering::SeqCst),
+        0,
+        "a new-symbol entry must be blocked at the concurrency cap"
     );
 
     handle.shutdown();

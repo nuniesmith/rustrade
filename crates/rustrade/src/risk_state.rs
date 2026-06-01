@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use rustrade_core::{Position, StateStore, Symbol};
 use rustrade_risk::{
-    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerSnapshot, SessionPnl, SessionPnlConfig,
-    SessionPnlSnapshot,
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerSnapshot, PortfolioRisk,
+    PortfolioRiskConfig, SessionPnl, SessionPnlConfig, SessionPnlSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -205,6 +205,19 @@ pub type RiskStateMap = Arc<RwLock<HashMap<Symbol, SymbolRisk>>>;
 /// after startup; brains that need real-time position awareness should
 /// be wired to a `FillSource` in Phase 2c.
 pub type PositionCache = Arc<RwLock<HashMap<Symbol, Position>>>;
+
+/// Shared account-wide [`PortfolioRisk`]. Cheaply cloneable — read in the
+/// execution pre-trade gate and mutated by the periodic risk sweep.
+///
+/// Unlike per-symbol risk this is **not** persisted: its only durable state is
+/// the daily-loss latch, which the sweep re-derives from the (restored)
+/// per-symbol session PnLs on the first tick after a restart.
+pub type PortfolioRiskState = Arc<RwLock<PortfolioRisk>>;
+
+/// Build the shared portfolio-risk state from its config.
+pub fn build_portfolio_risk(config: PortfolioRiskConfig) -> PortfolioRiskState {
+    Arc::new(RwLock::new(PortfolioRisk::new(config)))
+}
 
 /// Build a risk-state map seeded with one [`SymbolRisk`] per configured
 /// symbol. `cfg_for` resolves the `(SessionPnlConfig, CircuitBreakerConfig)`

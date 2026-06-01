@@ -72,6 +72,25 @@ multipliers, parameter overrides) are all resolved in code — see the
 
 ---
 
+## Shipped since 0.2 (unreleased)
+
+- **Account-level `PortfolioRisk`** (`rustrade-risk`): an account-wide
+  daily-loss halt (latching, with 00:00 UTC rollover), a max-concurrent-positions
+  cap, and a gross-exposure cap. Wired as a third pre-trade gate in the
+  execution service (entries only); account net PnL is derived from the
+  per-symbol session PnLs, so there's a single source of truth. Configured via
+  `BotConfig::portfolio` (`BotConfigBuilder::portfolio_config`); defaults to
+  all-off so existing bots are unaffected.
+- **`RiskSweepService`**: a supervised periodic sweep that `tick()`s every
+  symbol's `SessionPnl`/`CircuitBreaker` and the `PortfolioRisk` during a live
+  run — previously `tick()` only ran on restart, so a long-running bot never
+  rolled its daily-loss halt over at UTC midnight.
+
+> Both land the framework side of the FKS multi-asset risk roadmap (Track 2.1 +
+> 2.4). Bots consume them once a new `rustrade-framework` is published.
+
+---
+
 # Roadmap
 
 Milestones below are **dependency order, not a calendar**. The active focus is

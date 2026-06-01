@@ -12,7 +12,7 @@ use rustrade_core::{
     Brain, CandleSource, Capability, Error, ExchangeClient, FillSource, MarketDataBus,
     MarketSource, MetricsSink, NoopSink, Position, Result, SignalBus, StateStore, Symbol,
 };
-use rustrade_risk::{CircuitBreakerConfig, SessionPnlConfig, SizingConfig};
+use rustrade_risk::{CircuitBreakerConfig, PortfolioRiskConfig, SessionPnlConfig, SizingConfig};
 use rustrade_supervisor::{Supervisor, SupervisorConfig};
 use tokio_util::sync::CancellationToken;
 
@@ -20,12 +20,18 @@ use crate::execution::{ExecutionContext, ExecutionService};
 use crate::handle::BotHandle;
 use crate::order_tracker::{OrderReaperService, OrderTracker};
 use crate::risk_state::{
-    PositionCache, RiskPersister, RiskStateMap, build_position_cache, build_risk_state,
+    PortfolioRiskState, PositionCache, RiskPersister, RiskStateMap, build_portfolio_risk,
+    build_position_cache, build_risk_state,
 };
+use crate::risk_sweep::RiskSweepService;
 use crate::services::{CandlePollerService, FillRoutingService, MarketFeedService};
 
 const DEFAULT_MARKET_BUS_CAPACITY: usize = 1024;
 const DEFAULT_SIGNAL_BUS_CAPACITY: usize = 256;
+/// How often the risk sweep runs: detects the 00:00 UTC rollover for the
+/// per-symbol and account risk state, and refreshes the portfolio daily-loss
+/// latch. Coarse on purpose — these are day-scale controls.
+const RISK_SWEEP_CADENCE: Duration = Duration::from_secs(15);
 
 /// Risk-layer config for a symbol: session-PnL cap, circuit breaker, and
 /// position sizing. Used both as the bot-wide default
@@ -107,6 +113,11 @@ pub struct BotConfig {
     /// a larger size on a flagship symbol. Symbols absent here use the
     /// default. Resolve with [`Self::risk_for`].
     pub per_symbol_risk: HashMap<Symbol, RiskConfig>,
+    /// Account-wide risk applied across **all** symbols: a daily-loss halt,
+    /// a max-concurrent-positions cap, and a gross-exposure cap. Complements
+    /// the per-symbol [`RiskConfig`] gates. Defaults to all-off (opt-in), so
+    /// a bot that doesn't set it behaves exactly as before.
+    pub portfolio: PortfolioRiskConfig,
 }
 
 impl BotConfig {
@@ -134,6 +145,7 @@ pub struct BotConfigBuilder {
     close_positions_on_shutdown: Option<bool>,
     risk: RiskConfig,
     per_symbol_risk: HashMap<Symbol, RiskConfig>,
+    portfolio: PortfolioRiskConfig,
 }
 
 impl BotConfigBuilder {
@@ -205,6 +217,31 @@ impl BotConfigBuilder {
     /// Override the position-sizing config used for every symbol.
     pub fn sizing_config(mut self, cfg: SizingConfig) -> Self {
         self.risk.sizing = cfg;
+        self
+    }
+
+    /// Set the account-wide [`PortfolioRiskConfig`] — a daily-loss halt, a
+    /// max-concurrent-positions cap, and a gross-exposure cap applied across
+    /// all symbols. Unset, every limit is off (the per-symbol gates still apply).
+    ///
+    /// ```
+    /// use rustrade::{BotConfig, PortfolioRiskConfig};
+    ///
+    /// let cfg = BotConfig::builder()
+    ///     .name("bot")
+    ///     .symbols(["BTCUSDT", "ETHUSDT"])
+    ///     .without_signal_handler()
+    ///     .portfolio_config(PortfolioRiskConfig {
+    ///         max_daily_loss: -500.0,
+    ///         max_concurrent_positions: 3,
+    ///         max_gross_exposure: 50_000.0,
+    ///     })
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(cfg.portfolio.max_concurrent_positions, 3);
+    /// ```
+    pub fn portfolio_config(mut self, cfg: PortfolioRiskConfig) -> Self {
+        self.portfolio = cfg;
         self
     }
 
@@ -281,6 +318,7 @@ impl BotConfigBuilder {
         for (sym, cfg) in &self.per_symbol_risk {
             validate_risk(cfg, &format!("BotConfig.per_symbol_risk[{sym}]"))?;
         }
+        validate_portfolio(&self.portfolio)?;
 
         Ok(BotConfig {
             name,
@@ -292,6 +330,7 @@ impl BotConfigBuilder {
             close_positions_on_shutdown: self.close_positions_on_shutdown.unwrap_or(false),
             risk: self.risk,
             per_symbol_risk: self.per_symbol_risk,
+            portfolio: self.portfolio,
         })
     }
 }
@@ -308,6 +347,23 @@ fn validate_risk(risk: &RiskConfig, ctx: &str) -> Result<()> {
         return Err(Error::config(format!(
             "{ctx}.sizing.margin_per_trade must be a finite non-negative number"
         )));
+    }
+    Ok(())
+}
+
+/// Validate the account-wide [`PortfolioRiskConfig`]. `NaN` limits would make
+/// every comparison silently false (a disabled limit that looks enabled), so
+/// they're rejected; `±∞` is allowed as the explicit "disabled" sentinel.
+fn validate_portfolio(p: &PortfolioRiskConfig) -> Result<()> {
+    if p.max_daily_loss.is_nan() {
+        return Err(Error::config(
+            "BotConfig.portfolio.max_daily_loss must not be NaN (use f64::NEG_INFINITY to disable)",
+        ));
+    }
+    if p.max_gross_exposure.is_nan() {
+        return Err(Error::config(
+            "BotConfig.portfolio.max_gross_exposure must not be NaN (use f64::INFINITY to disable)",
+        ));
     }
     Ok(())
 }
@@ -708,12 +764,17 @@ impl Bot {
                 .map(|(s, r)| (s.clone(), r.sizing.clone()))
                 .collect(),
         ));
+        // Account-wide portfolio risk, shared between the execution gate
+        // (reads it) and the risk sweep (maintains its daily-loss latch).
+        let portfolio: PortfolioRiskState = build_portfolio_risk(self.config.portfolio.clone());
+
         let ctx = ExecutionContext {
             exchange: self.exchange.clone(),
             bus: self.market_bus.clone(),
             signals: self.signal_bus.clone(),
             positions: self.positions.clone(),
             risk: self.risk.clone(),
+            portfolio: portfolio.clone(),
             sizing,
             order_tracker: order_tracking_active.then(|| self.order_tracker.clone()),
             oco: oco.clone(),
@@ -723,6 +784,17 @@ impl Bot {
             let svc = ExecutionService::new(brain.clone(), ctx.clone());
             self.supervisor.spawn_service(Box::new(svc));
         }
+
+        // Periodic risk sweep: rolls per-symbol SessionPnl / CircuitBreaker and
+        // the portfolio halt over at 00:00 UTC during a live run (without it,
+        // tick() only fires on restart), and re-derives the account daily-loss
+        // latch from the per-symbol session PnLs.
+        self.supervisor
+            .spawn_service(Box::new(RiskSweepService::new(
+                self.risk.clone(),
+                portfolio.clone(),
+                RISK_SWEEP_CADENCE,
+            )));
 
         if order_tracking_active {
             // Safe: order_tracking_active implies order_tracking is Some.
