@@ -246,9 +246,41 @@ async fn run_bot(closes: Vec<f64>, tick: Duration) -> anyhow::Result<(usize, usi
     let handle = bot.handle();
     let bot_task = tokio::spawn(async move { bot.run_until_shutdown().await });
 
-    // Replay duration + warmup + slack for the last few events to flow.
-    let runtime = tick * (total as u32) + Duration::from_millis(300);
-    tokio::time::sleep(runtime).await;
+    // Wait for the replay to fully drain rather than racing a fixed timer —
+    // a fixed sleep makes the final order count depend on scheduler timing
+    // (flaky on slow CI, non-deterministic between runs). We declare "drained"
+    // only once (a) the publish window has elapsed, (b) some activity has been
+    // observed (so we don't stop during startup/SMA-warmup while counts are
+    // still all-zero), and (c) the counters have held steady for ~100 ms.
+    // Inter-crossover gaps in `series()` are far shorter than that window, so
+    // quiescence is reached only at the true end. Bounded by a deadline.
+    let start = tokio::time::Instant::now();
+    let publish_done = start + tick * (total as u32);
+    let deadline = publish_done + Duration::from_secs(5);
+    let snapshot = || {
+        (
+            exchange.buys.load(Ordering::SeqCst),
+            exchange.sells.load(Ordering::SeqCst),
+            brain_non_hold.load(Ordering::SeqCst),
+        )
+    };
+    let mut last = snapshot();
+    let mut stable_polls = 0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let now = snapshot();
+        if now == last {
+            stable_polls += 1;
+        } else {
+            stable_polls = 0;
+            last = now;
+        }
+        let drained =
+            now != (0, 0, 0) && tokio::time::Instant::now() >= publish_done && stable_polls >= 5;
+        if drained || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+    }
     handle.shutdown();
     bot_task.await??;
 
