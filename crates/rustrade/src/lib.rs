@@ -87,6 +87,7 @@
 pub mod bot;
 pub mod execution;
 pub mod handle;
+pub mod json_store;
 pub mod logging;
 pub mod order_tracker;
 pub(crate) mod risk_state;
@@ -95,6 +96,7 @@ pub mod services;
 
 pub use bot::{Bot, BotConfig, BotConfigBuilder, RiskConfig};
 pub use handle::{BotHandle, BotHealth, BrainHealthSnapshot};
+pub use json_store::JsonFileStore;
 pub use order_tracker::{OcoRegistry, OrderReaperService, OrderTracker, TrackedOrder};
 pub use services::{CandlePollerService, FillRoutingService, MarketFeedService};
 

@@ -85,9 +85,12 @@ on MSRV (1.94.1) + stable.
       so the daily halt rolls over at UTC midnight in a live run. *(Shipped.)*
 
 ### C — Durable risk state (trait exists, no real impl)
-- [ ] **`JsonFileStore` (or sqlite) `StateStore`.** The trait + `Bot::with_state_store`
-      + restore-on-boot are wired, but the only impl is in-memory, so risk state
-      does **not** survive restart out of the box. (Overlaps 0.2a.)
+- [x] **`JsonFileStore` `StateStore`.** Atomic, write-through JSON-file backend
+      (`rustrade::JsonFileStore`); `Bot::with_state_store(Arc::new(JsonFileStore::open(path).await?))`
+      makes per-symbol risk (session-PnL halt + breaker) survive a restart, and
+      the portfolio halt re-derives via the sweep. *(Shipped — Track 2.5.)*
+      Remaining option: a sqlite backend behind a feature flag for higher write
+      volume / multi-process access.
 
 ### D — Backtest fidelity for live order types (so a risk brain backtests as it trades)
 - [ ] **Apply the risk gates in backtest.** The engine ignores
@@ -167,10 +170,16 @@ multipliers, parameter overrides) are all resolved in code — see the
   per-symbol → per-class (keyed off `instrument_spec().asset_class`) → default,
   so one bot trades crypto-perps / FX / futures side by side with class-correct
   leverage and limits.
+- **`JsonFileStore`** (`rustrade` facade): the first durable `StateStore` — an
+  atomic (temp-file + rename), write-through JSON-file backend. With
+  `Bot::with_state_store(JsonFileStore::open(path))`, per-symbol risk state
+  (session-PnL halt, circuit breaker) survives a restart; the portfolio halt
+  re-derives from the restored per-symbol PnLs via the sweep. (Adds the `fs`
+  tokio feature to the facade.)
 
-> These land the framework side of the FKS multi-asset risk roadmap (Track 2.1,
-> 2.2, 2.3, 2.4) — the **class-aware risk layer is now complete**. Bots consume
-> it once a new `rustrade-framework` is published.
+> These land the framework side of the FKS multi-asset risk roadmap (Tracks 2.1,
+> 2.2, 2.3, 2.4, 2.5) — the **class-aware risk layer is complete and durable**.
+> Bots consume it once a new `rustrade-framework` is published.
 
 ---
 
