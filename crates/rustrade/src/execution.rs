@@ -315,7 +315,10 @@ impl ExecutionService {
                     Side::Sell
                 };
                 let price = price_from_event(event)?;
-                let contract_value = self.ctx.exchange.contract_value(symbol);
+                // Instrument metadata: contract size for sizing, plus tick /
+                // min-notional used below. `contract_value` mirrors the spec.
+                let spec = self.ctx.exchange.instrument_spec(symbol);
+                let contract_value = spec.contract_value;
                 let contracts = size_decision(
                     self.ctx.sizing.for_symbol(symbol),
                     decision.size_hint,
@@ -349,6 +352,22 @@ impl ExecutionService {
                         signal = %decision.signal,
                         reason = %block,
                         "decision blocked: portfolio risk"
+                    );
+                    return None;
+                }
+
+                // ── Instrument min-notional gate ──────────────────────
+                // Skip a dust order the venue would reject. No-op when the
+                // adapter reports no minimum (the default).
+                if !spec.meets_min_notional(new_notional) {
+                    self.orders_blocked.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        service = %self.name,
+                        symbol = %symbol,
+                        signal = %decision.signal,
+                        notional = new_notional,
+                        min_notional = spec.min_notional,
+                        "decision blocked: order below instrument min notional"
                     );
                     return None;
                 }
@@ -388,6 +407,8 @@ impl ExecutionService {
                             );
                             price
                         });
+                        // Snap to the venue's price tick (no-op when unknown).
+                        let limit = Price(spec.round_price(limit.value()));
                         let mut o = Order::limit(symbol.clone(), side, size, limit);
                         o.kind = kind;
                         o
