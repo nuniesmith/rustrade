@@ -62,23 +62,25 @@ on MSRV (1.94.1) + stable.
       the core stays venue-free) over exchange-apiws's signed clients
       (KuCoin `rest/orders`, `BybitPrivateClient`). Impl `MarketSource`/
       `FillSource`/`CandleSource` too. Advertise `Capability` truthfully.
-- [ ] **Instrument metadata on the trait.** `contract_value(&Symbol)->f64` is the
-      *only* asset hook today. Add tick size, lot size, min notional, price
-      precision, and **asset class** (an `InstrumentSpec`) so sizing rounds
-      correctly and rules can be class-aware. `Symbol` is an opaque string today.
+- [x] **Instrument metadata on the trait.** `InstrumentSpec` (contract value,
+      tick size, lot size, min notional, **asset class**) returned by
+      `ExchangeClient::instrument_spec`; the execution service sizes from it,
+      enforces min-notional, and snaps limit prices to the tick. *(Shipped — see
+      "Shipped since 0.2".)* Remaining nicety: richer `Symbol` parsing.
 
 ### B — Portfolio / account-level risk (entirely absent today)
 > Every `SessionPnl` / `CircuitBreaker` is **per-symbol**. Trading more than one
 > symbol needs account-wide controls.
-- [ ] **`PortfolioRisk`** in `rustrade-risk`: account-wide daily-loss limit,
-      aggregate drawdown, **gross/net exposure cap**, **max concurrent
-      positions**, buying-power budget — checked before `PositionSizer` sizes.
+- [x] **`PortfolioRisk`** in `rustrade-risk`: account-wide daily-loss halt,
+      **gross-exposure cap**, **max concurrent positions** — checked in the
+      execution pre-trade gate. *(Shipped.)* Remaining: net-exposure + an explicit
+      buying-power budget (needs a cached account balance).
 - [ ] **Per-asset-class `RiskConfig` presets** (crypto-perp / spot / FX / futures):
-      different leverage/stop/size rules per class, keyed off `InstrumentSpec`.
-- [ ] **Wire `SessionPnl::tick()` / `CircuitBreaker::tick()` into a periodic
-      sweep.** Today they tick only in `SymbolRisk::restore` — a halted daily
-      session **never auto-rolls over at UTC midnight** in a long-running live
-      bot (it's sticky until restart). `risk_state.rs` + a supervisor service.
+      different leverage/stop/size rules per class, keyed off `InstrumentSpec`
+      (now that `AssetClass` exists). *(Track 2.3 — next.)*
+- [x] **Wire `SessionPnl::tick()` / `CircuitBreaker::tick()` into a periodic
+      sweep.** `RiskSweepService` ticks per-symbol + portfolio risk on a cadence
+      so the daily halt rolls over at UTC midnight in a live run. *(Shipped.)*
 
 ### C — Durable risk state (trait exists, no real impl)
 - [ ] **`JsonFileStore` (or sqlite) `StateStore`.** The trait + `Bot::with_state_store`
@@ -149,9 +151,16 @@ multipliers, parameter overrides) are all resolved in code — see the
   symbol's `SessionPnl`/`CircuitBreaker` and the `PortfolioRisk` during a live
   run — previously `tick()` only ran on restart, so a long-running bot never
   rolled its daily-loss halt over at UTC midnight.
+- **`InstrumentSpec` + `AssetClass`** (`rustrade-core`): instrument metadata on
+  `ExchangeClient` (`instrument_spec(&Symbol)`) — contract value, price tick,
+  quantity lot, min notional, and asset class — generalising the single
+  `contract_value` hook. The execution service now sizes from the spec, enforces
+  the min-notional, and snaps limit prices to the tick (all no-ops under the
+  permissive default, so existing adapters are unaffected). The foundation for
+  class-aware rules.
 
-> Both land the framework side of the FKS multi-asset risk roadmap (Track 2.1 +
-> 2.4). Bots consume them once a new `rustrade-framework` is published.
+> These land the framework side of the FKS multi-asset risk roadmap (Track 2.1,
+> 2.2, 2.4). Bots consume them once a new `rustrade-framework` is published.
 
 ---
 

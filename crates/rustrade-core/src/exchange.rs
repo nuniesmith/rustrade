@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::instrument::InstrumentSpec;
 use crate::market::{MarketDataEvent, Side, Symbol};
 use crate::types::{Candle, Fill, Order, OrderKind, Position, Price, Volume};
 
@@ -196,6 +197,20 @@ pub trait ExchangeClient: Send + Sync + 'static {
     /// adapters override.
     fn contract_value(&self, _symbol: &Symbol) -> f64 {
         1.0
+    }
+
+    /// Full instrument metadata for `symbol`: contract size, price tick,
+    /// quantity lot, minimum notional, and [`AssetClass`](crate::AssetClass).
+    ///
+    /// The framework uses this to round orders to the venue's increments,
+    /// enforce a minimum order notional, and apply class-aware risk rules.
+    /// The default derives an [`InstrumentSpec`] from [`Self::contract_value`]
+    /// with no other constraints, so adapters that only override
+    /// `contract_value` keep working unchanged; adapters with real venue
+    /// metadata (tick/lot/min-notional) override this and should make
+    /// `contract_value` agree with `instrument_spec(symbol).contract_value`.
+    fn instrument_spec(&self, symbol: &Symbol) -> InstrumentSpec {
+        InstrumentSpec::from_contract_value(self.contract_value(symbol))
     }
 
     /// List the currently-resting (non-terminal) orders for a symbol.

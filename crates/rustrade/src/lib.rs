@@ -100,11 +100,11 @@ pub use services::{CandlePollerService, FillRoutingService, MarketFeedService};
 
 // Re-exports from sub-crates so downstream depends on `rustrade` only.
 pub use rustrade_core::{
-    Brain, BrainHealth, Candle, CandleSource, Capability, Decision, Error, EventSource, Exchange,
-    ExchangeClient, Fill, FillSource, InMemoryStore, MarketDataBus, MarketDataEvent, MarketSource,
-    MetricsSink, NoopSink, OpenOrder, Order, OrderKind, OrderStatus, Position, Price, Result, Side,
-    Signal, SignalBus, SignalType, SizeHint, StateStore, StopAttachment, StopKind, Symbol, Tick,
-    Volume,
+    AssetClass, Brain, BrainHealth, Candle, CandleSource, Capability, Decision, Error, EventSource,
+    Exchange, ExchangeClient, Fill, FillSource, InMemoryStore, InstrumentSpec, MarketDataBus,
+    MarketDataEvent, MarketSource, MetricsSink, NoopSink, OpenOrder, Order, OrderKind, OrderStatus,
+    Position, Price, Result, Side, Signal, SignalBus, SignalType, SizeHint, StateStore,
+    StopAttachment, StopKind, Symbol, Tick, Volume,
 };
 pub use rustrade_risk::{
     CircuitBreaker, CircuitBreakerConfig, Clock, ManualClock, PortfolioBlock, PortfolioRisk,

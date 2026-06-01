@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rustrade::{
     Bot, BotConfig, Brain, Candle, CircuitBreakerConfig, Decision, Exchange, ExchangeClient,
-    MarketDataEvent, Order, PortfolioRiskConfig, Position, Result, SessionPnlConfig, SignalType,
-    SizingConfig, Symbol,
+    InstrumentSpec, MarketDataEvent, Order, PortfolioRiskConfig, Position, Result,
+    SessionPnlConfig, SignalType, SizingConfig, Symbol,
 };
 
 // ── Fixtures ────────────────────────────────────────────────────────────
@@ -47,6 +47,7 @@ struct CountingExchange {
     placed: Arc<AtomicU64>,
     closed: Arc<AtomicU64>,
     positions: Mutex<HashMap<Symbol, Position>>,
+    min_notional: Mutex<f64>,
 }
 impl CountingExchange {
     fn new() -> (Arc<Self>, Arc<AtomicU64>, Arc<AtomicU64>) {
@@ -56,12 +57,17 @@ impl CountingExchange {
             placed: placed.clone(),
             closed: closed.clone(),
             positions: Mutex::new(HashMap::new()),
+            min_notional: Mutex::new(0.0),
         });
         (inst, placed, closed)
     }
 
     fn set_position(&self, sym: Symbol, pos: Position) {
         self.positions.lock().unwrap().insert(sym, pos);
+    }
+
+    fn set_min_notional(&self, v: f64) {
+        *self.min_notional.lock().unwrap() = v;
     }
 }
 #[async_trait]
@@ -91,6 +97,12 @@ impl ExchangeClient for CountingExchange {
     }
     async fn get_balance(&self, _c: &str) -> Result<f64> {
         Ok(0.0)
+    }
+    fn instrument_spec(&self, _s: &Symbol) -> InstrumentSpec {
+        InstrumentSpec {
+            min_notional: *self.min_notional.lock().unwrap(),
+            ..InstrumentSpec::default()
+        }
     }
 }
 
@@ -363,6 +375,51 @@ async fn portfolio_max_concurrent_blocks_new_symbol() {
         placed.load(Ordering::SeqCst),
         0,
         "a new-symbol entry must be blocked at the concurrency cap"
+    );
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn instrument_min_notional_blocks_small_order() {
+    let brain = Arc::new(FixedSignalBrain {
+        signal: SignalType::Buy,
+    });
+    let (exchange, placed, _closed) = CountingExchange::new();
+    // margin 100 × 1x at price 100, cv 1 ⇒ 1 contract ⇒ notional 100.
+    // A 1000 min-notional rejects it.
+    exchange.set_min_notional(1000.0);
+
+    let bot = Bot::new(
+        BotConfig::builder()
+            .name("min-notional")
+            .symbol("BTCUSDT")
+            .without_signal_handler()
+            .shutdown_timeout(Duration::from_secs(2))
+            .sizing_config(SizingConfig {
+                margin_per_trade: 100.0,
+                leverage: 1,
+                max_contracts: 10,
+            })
+            .build()
+            .unwrap(),
+        exchange,
+        vec![brain],
+    )
+    .unwrap();
+
+    let handle = bot.handle();
+    let bus = bot.market_data_bus().clone();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    bus.publish(candle_event("BTCUSDT", 100.0));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(
+        placed.load(Ordering::SeqCst),
+        0,
+        "an order below the instrument min notional must be blocked"
     );
 
     handle.shutdown();

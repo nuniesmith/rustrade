@@ -38,6 +38,7 @@ pub mod brain;
 pub mod bus;
 pub mod error;
 pub mod exchange;
+pub mod instrument;
 pub mod market;
 pub mod metrics;
 pub mod signal;
@@ -51,6 +52,7 @@ pub use exchange::{
     CandleSource, Capability, EventSource, ExchangeClient, FillSource, MarketSource, OpenOrder,
     OrderStatus,
 };
+pub use instrument::{AssetClass, InstrumentSpec};
 pub use market::{Exchange, MarketDataEvent, Side, Symbol};
 pub use metrics::{MetricsSink, NoopSink};
 pub use signal::{Signal, SignalType};
