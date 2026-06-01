@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustrade_core::{
-    Brain, CandleSource, Capability, Error, ExchangeClient, FillSource, MarketDataBus,
+    AssetClass, Brain, CandleSource, Capability, Error, ExchangeClient, FillSource, MarketDataBus,
     MarketSource, MetricsSink, NoopSink, Position, Result, SignalBus, StateStore, Symbol,
 };
 use rustrade_risk::{CircuitBreakerConfig, PortfolioRiskConfig, SessionPnlConfig, SizingConfig};
@@ -46,6 +46,107 @@ pub struct RiskConfig {
     pub circuit_breaker: CircuitBreakerConfig,
     /// Position-sizing config used by the execution service.
     pub sizing: SizingConfig,
+}
+
+impl RiskConfig {
+    /// Per-[`AssetClass`] starting presets. These are **sensible defaults to
+    /// tune**, not prescriptions — they mainly differ in leverage (the most
+    /// class-defining knob) and per-trade size; tighten or loosen for your
+    /// venue and risk appetite. Apply one per class via
+    /// [`BotConfigBuilder::class_risk`], or per symbol via
+    /// [`BotConfigBuilder::symbol_risk`].
+    ///
+    /// Crypto perpetuals: moderate 5× leverage (the framework default shape).
+    #[must_use]
+    pub fn crypto_perp() -> Self {
+        Self {
+            session_pnl: SessionPnlConfig { loss_limit: -50.0 },
+            circuit_breaker: CircuitBreakerConfig::default(),
+            sizing: SizingConfig {
+                margin_per_trade: 500.0,
+                leverage: 5,
+                max_contracts: 50,
+            },
+        }
+    }
+
+    /// Crypto spot: **no leverage** (1×) — one unit traded is one base unit.
+    #[must_use]
+    pub fn crypto_spot() -> Self {
+        Self {
+            session_pnl: SessionPnlConfig { loss_limit: -50.0 },
+            circuit_breaker: CircuitBreakerConfig::default(),
+            sizing: SizingConfig {
+                margin_per_trade: 500.0,
+                leverage: 1,
+                max_contracts: 50,
+            },
+        }
+    }
+
+    /// FX: higher leverage is conventional; a tighter sliding breaker.
+    #[must_use]
+    pub fn fx() -> Self {
+        Self {
+            session_pnl: SessionPnlConfig { loss_limit: -100.0 },
+            circuit_breaker: CircuitBreakerConfig {
+                loss_limit: 3,
+                window_secs: 7_200,
+                cooldown_secs: 3_600,
+            },
+            sizing: SizingConfig {
+                margin_per_trade: 1_000.0,
+                leverage: 20,
+                max_contracts: 50,
+            },
+        }
+    }
+
+    /// Dated futures: bigger contracts, moderate leverage, a wider daily cap.
+    #[must_use]
+    pub fn futures() -> Self {
+        Self {
+            session_pnl: SessionPnlConfig { loss_limit: -200.0 },
+            circuit_breaker: CircuitBreakerConfig::default(),
+            sizing: SizingConfig {
+                margin_per_trade: 1_000.0,
+                leverage: 10,
+                max_contracts: 20,
+            },
+        }
+    }
+
+    /// Cash equities: **no leverage** (1×), conservative size.
+    #[must_use]
+    pub fn equity() -> Self {
+        Self {
+            session_pnl: SessionPnlConfig { loss_limit: -200.0 },
+            circuit_breaker: CircuitBreakerConfig::default(),
+            sizing: SizingConfig {
+                margin_per_trade: 1_000.0,
+                leverage: 1,
+                max_contracts: 20,
+            },
+        }
+    }
+
+    /// The starting preset for an [`AssetClass`]: `CryptoSpot` →
+    /// [`Self::crypto_spot`], `Fx` → [`Self::fx`], `Future` → [`Self::futures`],
+    /// `Equity` → [`Self::equity`]; `CryptoPerp` and any other class fall back
+    /// to [`Self::crypto_perp`].
+    #[must_use]
+    pub fn preset_for(class: AssetClass) -> Self {
+        match class {
+            AssetClass::CryptoSpot => Self::crypto_spot(),
+            AssetClass::Fx => Self::fx(),
+            AssetClass::Future => Self::futures(),
+            AssetClass::Equity => Self::equity(),
+            AssetClass::CryptoPerp => Self::crypto_perp(),
+            // `AssetClass` is #[non_exhaustive]: `Other` and any future class
+            // fall back to the crypto-perp shape.
+            _ => Self::crypto_perp(),
+        }
+    }
 }
 
 /// Configuration for a [`Bot`].
@@ -111,8 +212,15 @@ pub struct BotConfig {
     /// [`RiskConfig`] (session-PnL cap, circuit breaker, and sizing) instead
     /// of [`Self::risk`] — e.g. a tighter drawdown cap on a volatile alt, or
     /// a larger size on a flagship symbol. Symbols absent here use the
-    /// default. Resolve with [`Self::risk_for`].
+    /// default. Resolve with [`Self::resolve_risk`].
     pub per_symbol_risk: HashMap<Symbol, RiskConfig>,
+    /// Per-[`AssetClass`] risk overrides. A symbol whose
+    /// [`InstrumentSpec`](rustrade_core::InstrumentSpec) reports a class present
+    /// here uses that class's [`RiskConfig`] — unless a per-symbol override
+    /// also exists, which wins. Lets one bot apply crypto-perp / spot / FX /
+    /// futures rules side by side. See [`RiskConfig::preset_for`] for starting
+    /// presets and [`Self::resolve_risk`] for the precedence.
+    pub per_class_risk: HashMap<AssetClass, RiskConfig>,
     /// Account-wide risk applied across **all** symbols: a daily-loss halt,
     /// a max-concurrent-positions cap, and a gross-exposure cap. Complements
     /// the per-symbol [`RiskConfig`] gates. Defaults to all-off (opt-in), so
@@ -126,10 +234,23 @@ impl BotConfig {
         BotConfigBuilder::default()
     }
 
-    /// The effective [`RiskConfig`] for `symbol`: its per-symbol override if
-    /// one is set, otherwise the bot-wide default ([`Self::risk`]).
+    /// The effective [`RiskConfig`] for `symbol`, ignoring asset class: its
+    /// per-symbol override if set, else the bot-wide default ([`Self::risk`]).
+    /// Prefer [`Self::resolve_risk`], which also honours per-class overrides.
     pub fn risk_for(&self, symbol: &Symbol) -> &RiskConfig {
         self.per_symbol_risk.get(symbol).unwrap_or(&self.risk)
+    }
+
+    /// The effective [`RiskConfig`] for `symbol` of the given `asset_class`,
+    /// applying the precedence **per-symbol → per-class → default**. The
+    /// framework resolves `asset_class` from
+    /// [`ExchangeClient::instrument_spec`] at startup, so a multi-asset bot
+    /// gets the right rules per symbol without listing every one.
+    pub fn resolve_risk(&self, symbol: &Symbol, asset_class: AssetClass) -> &RiskConfig {
+        self.per_symbol_risk
+            .get(symbol)
+            .or_else(|| self.per_class_risk.get(&asset_class))
+            .unwrap_or(&self.risk)
     }
 }
 
@@ -145,6 +266,7 @@ pub struct BotConfigBuilder {
     close_positions_on_shutdown: Option<bool>,
     risk: RiskConfig,
     per_symbol_risk: HashMap<Symbol, RiskConfig>,
+    per_class_risk: HashMap<AssetClass, RiskConfig>,
     portfolio: PortfolioRiskConfig,
 }
 
@@ -272,6 +394,34 @@ impl BotConfigBuilder {
         self
     }
 
+    /// Set a per-[`AssetClass`] [`RiskConfig`] override. Symbols whose
+    /// instrument reports this class use `cfg` (unless a per-symbol override
+    /// also exists, which wins). See [`RiskConfig::preset_for`] for ready-made
+    /// presets to start from.
+    ///
+    /// ```
+    /// use rustrade::{AssetClass, BotConfig, RiskConfig};
+    ///
+    /// let cfg = BotConfig::builder()
+    ///     .name("multi-asset")
+    ///     .symbols(["XBTUSDTM", "EURUSD"])
+    ///     .without_signal_handler()
+    ///     .class_risk(AssetClass::CryptoPerp, RiskConfig::crypto_perp())
+    ///     .class_risk(AssetClass::Fx, RiskConfig::fx())
+    ///     .build()
+    ///     .unwrap();
+    /// // FX symbols resolve to the FX preset (20× leverage) absent a
+    /// // per-symbol override.
+    /// assert_eq!(
+    ///     cfg.resolve_risk(&"EURUSD".into(), AssetClass::Fx).sizing.leverage,
+    ///     20
+    /// );
+    /// ```
+    pub fn class_risk(mut self, class: AssetClass, cfg: RiskConfig) -> Self {
+        self.per_class_risk.insert(class, cfg);
+        self
+    }
+
     /// Validate and build. Returns `Error::Config` on any constraint
     /// violation — the framework never panics on bad config.
     pub fn build(self) -> Result<BotConfig> {
@@ -312,11 +462,14 @@ impl BotConfigBuilder {
             ));
         }
 
-        // Validate the default risk config and every per-symbol override
-        // with the same rules — bad config never reaches the runtime.
+        // Validate the default risk config and every per-symbol / per-class
+        // override with the same rules — bad config never reaches the runtime.
         validate_risk(&self.risk, "BotConfig.risk")?;
         for (sym, cfg) in &self.per_symbol_risk {
             validate_risk(cfg, &format!("BotConfig.per_symbol_risk[{sym}]"))?;
+        }
+        for (class, cfg) in &self.per_class_risk {
+            validate_risk(cfg, &format!("BotConfig.per_class_risk[{class:?}]"))?;
         }
         validate_portfolio(&self.portfolio)?;
 
@@ -330,6 +483,7 @@ impl BotConfigBuilder {
             close_positions_on_shutdown: self.close_positions_on_shutdown.unwrap_or(false),
             risk: self.risk,
             per_symbol_risk: self.per_symbol_risk,
+            per_class_risk: self.per_class_risk,
             portfolio: self.portfolio,
         })
     }
@@ -495,7 +649,10 @@ impl Bot {
         let signal_bus = SignalBus::with_capacity(config.signal_bus_capacity);
         let positions = build_position_cache(&config.symbols);
         let risk = build_risk_state(&config.symbols, |sym| {
-            let r = config.risk_for(sym);
+            // Resolve per-symbol → per-class (by the adapter's asset class) →
+            // default, so a multi-asset bot gets the right gates per symbol.
+            let class = exchange.instrument_spec(sym).asset_class;
+            let r = config.resolve_risk(sym, class);
             (r.session_pnl.clone(), r.circuit_breaker.clone())
         });
 
@@ -756,12 +913,17 @@ impl Bot {
         let oco = brackets_active.then(crate::order_tracker::OcoRegistry::new);
         tracing::info!(brackets_active, "bracket (SL+TP/OCO) support");
 
+        // Resolve each symbol's effective sizing (per-symbol → per-class by
+        // asset class → default) so multi-asset bots size each class correctly.
         let sizing = Arc::new(crate::execution::SymbolSizing::new(
             self.config.risk.sizing.clone(),
             self.config
-                .per_symbol_risk
+                .symbols
                 .iter()
-                .map(|(s, r)| (s.clone(), r.sizing.clone()))
+                .map(|s| {
+                    let class = self.exchange.instrument_spec(s).asset_class;
+                    (s.clone(), self.config.resolve_risk(s, class).sizing.clone())
+                })
                 .collect(),
         ));
         // Account-wide portfolio risk, shared between the execution gate
@@ -949,6 +1111,87 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use rustrade_core::{Fill, MarketDataEvent, Order, Position};
+
+    #[test]
+    fn presets_differ_in_leverage_by_class() {
+        assert_eq!(RiskConfig::crypto_perp().sizing.leverage, 5);
+        assert_eq!(RiskConfig::crypto_spot().sizing.leverage, 1);
+        assert_eq!(RiskConfig::fx().sizing.leverage, 20);
+        assert_eq!(RiskConfig::futures().sizing.leverage, 10);
+        assert_eq!(RiskConfig::equity().sizing.leverage, 1);
+    }
+
+    #[test]
+    fn preset_for_maps_each_class_with_perp_fallback() {
+        assert_eq!(
+            RiskConfig::preset_for(AssetClass::CryptoSpot)
+                .sizing
+                .leverage,
+            1
+        );
+        assert_eq!(RiskConfig::preset_for(AssetClass::Fx).sizing.leverage, 20);
+        assert_eq!(
+            RiskConfig::preset_for(AssetClass::Future).sizing.leverage,
+            10
+        );
+        assert_eq!(
+            RiskConfig::preset_for(AssetClass::Equity).sizing.leverage,
+            1
+        );
+        // CryptoPerp and the catch-all (`Other` / future classes) → perp shape.
+        assert_eq!(
+            RiskConfig::preset_for(AssetClass::CryptoPerp)
+                .sizing
+                .leverage,
+            5
+        );
+        assert_eq!(RiskConfig::preset_for(AssetClass::Other).sizing.leverage, 5);
+    }
+
+    #[test]
+    fn resolve_risk_precedence_symbol_then_class_then_default() {
+        let cfg = BotConfig::builder()
+            .name("t")
+            .symbols(["XBTUSDTM", "EURUSD", "ETHUSDTM"])
+            .without_signal_handler()
+            .class_risk(AssetClass::Fx, RiskConfig::fx())
+            .symbol_risk(
+                "ETHUSDTM",
+                RiskConfig {
+                    sizing: SizingConfig {
+                        margin_per_trade: 1.0,
+                        leverage: 7,
+                        max_contracts: 1,
+                    },
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap();
+
+        // Per-symbol override wins even when a class override would also match.
+        assert_eq!(
+            cfg.resolve_risk(&"ETHUSDTM".into(), AssetClass::Fx)
+                .sizing
+                .leverage,
+            7
+        );
+        // No per-symbol override → the per-class override applies.
+        assert_eq!(
+            cfg.resolve_risk(&"EURUSD".into(), AssetClass::Fx)
+                .sizing
+                .leverage,
+            20
+        );
+        // Neither → the bot-wide default.
+        let default_lev = RiskConfig::default().sizing.leverage;
+        assert_eq!(
+            cfg.resolve_risk(&"XBTUSDTM".into(), AssetClass::CryptoPerp)
+                .sizing
+                .leverage,
+            default_lev
+        );
+    }
 
     struct NoopBrain;
     #[async_trait]

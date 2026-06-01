@@ -15,9 +15,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use rustrade::{
-    Bot, BotConfig, Brain, Candle, CircuitBreakerConfig, Decision, Exchange, ExchangeClient,
-    InstrumentSpec, MarketDataEvent, Order, PortfolioRiskConfig, Position, Result,
-    SessionPnlConfig, SignalType, SizingConfig, Symbol,
+    AssetClass, Bot, BotConfig, Brain, Candle, CircuitBreakerConfig, Decision, Exchange,
+    ExchangeClient, InstrumentSpec, MarketDataEvent, Order, PortfolioRiskConfig, Position, Result,
+    RiskConfig, SessionPnlConfig, SignalType, SizingConfig, Symbol,
 };
 
 // ── Fixtures ────────────────────────────────────────────────────────────
@@ -48,6 +48,9 @@ struct CountingExchange {
     closed: Arc<AtomicU64>,
     positions: Mutex<HashMap<Symbol, Position>>,
     min_notional: Mutex<f64>,
+    asset_class: Mutex<AssetClass>,
+    /// Size (contracts) of the most recently placed order.
+    last_size: AtomicU64,
 }
 impl CountingExchange {
     fn new() -> (Arc<Self>, Arc<AtomicU64>, Arc<AtomicU64>) {
@@ -58,6 +61,8 @@ impl CountingExchange {
             closed: closed.clone(),
             positions: Mutex::new(HashMap::new()),
             min_notional: Mutex::new(0.0),
+            asset_class: Mutex::new(AssetClass::CryptoSpot),
+            last_size: AtomicU64::new(0),
         });
         (inst, placed, closed)
     }
@@ -69,13 +74,23 @@ impl CountingExchange {
     fn set_min_notional(&self, v: f64) {
         *self.min_notional.lock().unwrap() = v;
     }
+
+    fn set_asset_class(&self, class: AssetClass) {
+        *self.asset_class.lock().unwrap() = class;
+    }
+
+    fn last_size(&self) -> u64 {
+        self.last_size.load(Ordering::SeqCst)
+    }
 }
 #[async_trait]
 impl ExchangeClient for CountingExchange {
     fn name(&self) -> &str {
         "counting"
     }
-    async fn place_order(&self, _o: &Order) -> Result<String> {
+    async fn place_order(&self, o: &Order) -> Result<String> {
+        self.last_size
+            .store(o.size.value() as u64, Ordering::SeqCst);
         let n = self.placed.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(format!("ord-{n}"))
     }
@@ -100,6 +115,7 @@ impl ExchangeClient for CountingExchange {
     }
     fn instrument_spec(&self, _s: &Symbol) -> InstrumentSpec {
         InstrumentSpec {
+            asset_class: *self.asset_class.lock().unwrap(),
             min_notional: *self.min_notional.lock().unwrap(),
             ..InstrumentSpec::default()
         }
@@ -375,6 +391,70 @@ async fn portfolio_max_concurrent_blocks_new_symbol() {
         placed.load(Ordering::SeqCst),
         0,
         "a new-symbol entry must be blocked at the concurrency cap"
+    );
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn per_class_risk_sizes_by_asset_class() {
+    let brain = Arc::new(FixedSignalBrain {
+        signal: SignalType::Buy,
+    });
+    let (exchange, placed, _closed) = CountingExchange::new();
+    // The symbol trades as FX, so the FX class override should apply.
+    exchange.set_asset_class(AssetClass::Fx);
+
+    let bot = Bot::new(
+        BotConfig::builder()
+            .name("class-sizing")
+            .symbol("EURUSD")
+            .without_signal_handler()
+            .shutdown_timeout(Duration::from_secs(2))
+            // Default sizing would give 1 contract (1× leverage); the FX class
+            // override gives 10 (10× leverage). cv = 1 from the spec.
+            .sizing_config(SizingConfig {
+                margin_per_trade: 100.0,
+                leverage: 1,
+                max_contracts: 100,
+            })
+            .class_risk(
+                AssetClass::Fx,
+                RiskConfig {
+                    sizing: SizingConfig {
+                        margin_per_trade: 100.0,
+                        leverage: 10,
+                        max_contracts: 100,
+                    },
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap(),
+        exchange.clone(),
+        vec![brain],
+    )
+    .unwrap();
+
+    let handle = bot.handle();
+    let bus = bot.market_data_bus().clone();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    bus.publish(candle_event("EURUSD", 100.0));
+
+    wait_until(
+        || placed.load(Ordering::SeqCst) == 1,
+        Duration::from_secs(2),
+        "order never placed",
+    )
+    .await;
+
+    // 100 margin × 10 leverage / (100 price × 1 cv) = 10 contracts.
+    assert_eq!(
+        exchange.last_size(),
+        10,
+        "the FX class override (10× leverage) should size the order, not the 1× default"
     );
 
     handle.shutdown();
