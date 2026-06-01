@@ -23,9 +23,17 @@ Scope reminder (revisited 2026-05):
 
 ## Status snapshot
 
-`main` is green at **0.1.0**: ~200 tests (unit + integration + doc + proptest
-+ fuzz + 3 chaos) pass on stable; `clippy -D warnings` clean;
-`cargo doc --no-deps` clean. CI runs Linux + macOS on MSRV (1.94.1) + stable.
+`main` is at **0.2.1** (`workspace.package.version`, all internal path-deps,
+and `Cargo.lock` agree; facade publishes as `rustrade-framework`). ~200 tests
+(unit + integration + doc + proptest + fuzz + 3 chaos) pass on stable;
+`clippy -D warnings` clean; `cargo doc --no-deps` clean. CI runs Linux + macOS
+on MSRV (1.94.1) + stable.
+
+> ⚠️ **Docs lag the code.** `README.md:8-11` says "0.2.0"; `CHANGELOG.md` has no
+> `0.2.0`/`0.2.1` section and doesn't mention the three latest shipped features
+> (per-symbol risk, SL+TP brackets, multi-brain arbitration); there's no git
+> tag. **Do:** add the `0.2.0`/`0.2.1` CHANGELOG sections from git history, tag
+> `v0.2.1`, and fix the README status line.
 
 | Crate                  | State    | Tests                    |
 | ---------------------- | -------- | ------------------------ |
@@ -35,6 +43,62 @@ Scope reminder (revisited 2026-05):
 | `rustrade-backtest`    | shipped  | 38 unit + 13 integ + doc |
 | `rustrade` (facade)    | shipped  | 13 unit + 19 integ       |
 | examples (4)           | shipped  | run end-to-end           |
+
+---
+
+## 0.3+ — Multi-asset, risk-aware, brain-driven trading  ◀ NET-NEW
+
+> Driven by the cross-repo goal: a (janus) brain trading **multiple asset
+> classes under explicit risk rules** through this framework. See
+> `fks-full/docs/MULTI_ASSET_BRAIN_ROADMAP.md`. These items are **not** covered
+> by the 0.2–0.5 milestones below — the per-symbol risk tier and trait surface
+> are solid, but the portfolio/asset-class layer and a real exchange adapter are
+> greenfield. Sequenced by leverage.
+
+### A — A real exchange adapter (the #1 gap; pairs with 0.3a sim adapter)
+- [ ] **`exchange-apiws` → `ExchangeClient` adapter.** Today the only impls are
+      `StubExchange`/`NoopExchange`/`MockExchange` — nothing places a real order.
+      Build the bridge (likely a separate crate, `rustrade-exchange-apiws`, so
+      the core stays venue-free) over exchange-apiws's signed clients
+      (KuCoin `rest/orders`, `BybitPrivateClient`). Impl `MarketSource`/
+      `FillSource`/`CandleSource` too. Advertise `Capability` truthfully.
+- [ ] **Instrument metadata on the trait.** `contract_value(&Symbol)->f64` is the
+      *only* asset hook today. Add tick size, lot size, min notional, price
+      precision, and **asset class** (an `InstrumentSpec`) so sizing rounds
+      correctly and rules can be class-aware. `Symbol` is an opaque string today.
+
+### B — Portfolio / account-level risk (entirely absent today)
+> Every `SessionPnl` / `CircuitBreaker` is **per-symbol**. Trading more than one
+> symbol needs account-wide controls.
+- [ ] **`PortfolioRisk`** in `rustrade-risk`: account-wide daily-loss limit,
+      aggregate drawdown, **gross/net exposure cap**, **max concurrent
+      positions**, buying-power budget — checked before `PositionSizer` sizes.
+- [ ] **Per-asset-class `RiskConfig` presets** (crypto-perp / spot / FX / futures):
+      different leverage/stop/size rules per class, keyed off `InstrumentSpec`.
+- [ ] **Wire `SessionPnl::tick()` / `CircuitBreaker::tick()` into a periodic
+      sweep.** Today they tick only in `SymbolRisk::restore` — a halted daily
+      session **never auto-rolls over at UTC midnight** in a long-running live
+      bot (it's sticky until restart). `risk_state.rs` + a supervisor service.
+
+### C — Durable risk state (trait exists, no real impl)
+- [ ] **`JsonFileStore` (or sqlite) `StateStore`.** The trait + `Bot::with_state_store`
+      + restore-on-boot are wired, but the only impl is in-memory, so risk state
+      does **not** survive restart out of the box. (Overlaps 0.2a.)
+
+### D — Backtest fidelity for live order types (so a risk brain backtests as it trades)
+- [ ] **Apply the risk gates in backtest.** The engine ignores
+      `SessionPnl`/`CircuitBreaker` today, so a backtest won't reproduce live
+      gating. Thread `RiskConfig` through `BacktestConfig` + engine.
+- [ ] **Honour limit/stop fills** (today taker-at-close) + **funding model** for
+      perps + **portfolio-level metrics** (expectancy, avg win/loss, per-asset).
+      (Overlaps 0.4a/0.4b — called out here because it's load-bearing for
+      multi-asset risk validation.)
+
+### E — Ensemble support (for a multi-model brain)
+- [ ] **Multi-brain-per-symbol netting/arbitration.** Today: startup rejection
+      (`owned_symbols`) or unguarded coexistence (`None`). An ensemble that
+      genuinely shares a symbol has no netting layer — two `None` brains can place
+      opposing orders. A `BrainComposer` / netting service would close this.
 
 ---
 
