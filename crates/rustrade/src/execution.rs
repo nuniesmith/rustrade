@@ -26,12 +26,12 @@ use rustrade_core::{
     Brain, Capability, Decision, ExchangeClient, MarketDataBus, MarketDataEvent, Order, OrderKind,
     Position, Price, Side, Signal, SignalBus, SignalType, SizeHint, StopAttachment, Symbol, Volume,
 };
-use rustrade_risk::{PositionSizer, SizingConfig};
+use rustrade_risk::{PortfolioState, PositionSizer, SizingConfig};
 use rustrade_supervisor::{RestartPolicy, TradingService};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
-use crate::risk_state::{PositionCache, RiskStateMap};
+use crate::risk_state::{PortfolioRiskState, PositionCache, RiskStateMap};
 
 /// Shared inputs every [`ExecutionService`] needs.
 ///
@@ -44,6 +44,9 @@ pub(crate) struct ExecutionContext {
     pub signals: SignalBus,
     pub positions: PositionCache,
     pub risk: RiskStateMap,
+    /// Account-wide portfolio risk: the pre-trade gate reads it (entries only);
+    /// the risk sweep maintains its daily-loss latch.
+    pub portfolio: PortfolioRiskState,
     /// Per-symbol sizing resolver (default + overrides). The execution
     /// service sizes each order with the config for the event's symbol.
     pub sizing: Arc<SymbolSizing>,
@@ -249,6 +252,40 @@ impl ExecutionService {
         Ok(())
     }
 
+    /// Assemble the aggregate account state for the portfolio gate: open-position
+    /// count + gross exposure (Σ `|qty|·entry·contract_value`) and whether
+    /// `symbol` is already open, from the position cache; plus the account net
+    /// PnL (Σ per-symbol session net) from the risk map. `new_notional` is the
+    /// quote-currency size of the entry under consideration.
+    async fn portfolio_state(&self, symbol: &Symbol, new_notional: f64) -> PortfolioState {
+        let (open_positions, gross_exposure, symbol_already_open) = {
+            let positions = self.ctx.positions.read().await;
+            let mut open = 0u32;
+            let mut gross = 0.0;
+            for (sym, p) in positions.iter() {
+                if p.is_flat() {
+                    continue;
+                }
+                open += 1;
+                let px = p.entry_price.unwrap_or(0.0);
+                gross += p.qty.abs() * px * self.ctx.exchange.contract_value(sym);
+            }
+            let already = positions.get(symbol).is_some_and(|p| !p.is_flat());
+            (open, gross, already)
+        };
+        let account_net_pnl = {
+            let risk = self.ctx.risk.read().await;
+            risk.values().map(|sr| sr.session_pnl.net_pnl()).sum()
+        };
+        PortfolioState {
+            open_positions,
+            gross_exposure,
+            new_notional,
+            symbol_already_open,
+            account_net_pnl,
+        }
+    }
+
     async fn build_order(
         &self,
         event: &MarketDataEvent,
@@ -299,6 +336,22 @@ impl ExecutionService {
                     return None;
                 }
                 let size = Volume(contracts as f64);
+
+                // ── Gate 3: account-wide portfolio risk (entries only) ─
+                // Exits (the Close arm) are never gated here — only new risk.
+                let new_notional = f64::from(contracts) * price.value() * contract_value;
+                let pf_state = self.portfolio_state(symbol, new_notional).await;
+                if let Err(block) = self.ctx.portfolio.read().await.check_entry(pf_state) {
+                    self.orders_blocked.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        service = %self.name,
+                        symbol = %symbol,
+                        signal = %decision.signal,
+                        reason = %block,
+                        "decision blocked: portfolio risk"
+                    );
+                    return None;
+                }
 
                 // ── Order-kind capability gate ────────────────────────
                 // Block (don't silently downgrade) a kind the adapter

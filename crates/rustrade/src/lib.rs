@@ -90,6 +90,7 @@ pub mod handle;
 pub mod logging;
 pub mod order_tracker;
 pub(crate) mod risk_state;
+pub(crate) mod risk_sweep;
 pub mod services;
 
 pub use bot::{Bot, BotConfig, BotConfigBuilder, RiskConfig};
@@ -106,8 +107,9 @@ pub use rustrade_core::{
     Volume,
 };
 pub use rustrade_risk::{
-    CircuitBreaker, CircuitBreakerConfig, Clock, ManualClock, PositionSizer, SessionPnl,
-    SessionPnlConfig, SizingConfig, SystemClock,
+    CircuitBreaker, CircuitBreakerConfig, Clock, ManualClock, PortfolioBlock, PortfolioRisk,
+    PortfolioRiskConfig, PortfolioState, PositionSizer, SessionPnl, SessionPnlConfig, SizingConfig,
+    SystemClock,
 };
 pub use rustrade_supervisor::{
     BackoffConfig, RestartPolicy, ServiceLifecycleSnapshot, ServicePhase, SpawnOptions, Supervisor,
