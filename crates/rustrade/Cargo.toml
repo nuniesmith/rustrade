@@ -32,7 +32,8 @@ rustrade-supervisor = { workspace = true }
 rustrade-risk       = { workspace = true }
 
 async-trait = { workspace = true }
-tokio       = { workspace = true }
+# `fs` (on top of the workspace features) for the JsonFileStore's async file I/O.
+tokio       = { workspace = true, features = ["fs"] }
 tokio-util  = { workspace = true }
 tracing     = { workspace = true }
 tracing-subscriber = { workspace = true }
