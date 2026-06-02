@@ -9,6 +9,36 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+### Added — multi-asset risk layer (account-level + asset-class)
+- **`PortfolioRisk` (`rustrade-risk`)** — account-wide risk complementing the
+  per-symbol gates: a latching daily-loss halt (net realised PnL summed across
+  symbols, sticky until the 00:00 UTC rollover), a max-concurrent-positions cap,
+  and a gross-exposure cap. Checked as a third pre-trade gate in the execution
+  service (entries only). Configured via `BotConfig::portfolio`
+  (`BotConfigBuilder::portfolio_config`); defaults to all-off (opt-in), so
+  existing bots are unaffected.
+- **`RiskSweepService`** — a supervised periodic sweep that `tick()`s every
+  symbol's `SessionPnl` / `CircuitBreaker` and the `PortfolioRisk` during a live
+  run, so the daily-loss halt rolls over at 00:00 UTC (previously `tick()` only
+  ran on restart — a long-running bot never rolled over).
+- **`InstrumentSpec` + `AssetClass` (`rustrade-core`)** — instrument metadata on
+  `ExchangeClient::instrument_spec(&Symbol)`: contract value, price tick,
+  quantity lot, min notional, and asset class, generalising the lone
+  `contract_value` hook (subsumed by the spec). The execution service sizes from
+  the spec, enforces min-notional, and snaps limit prices to the tick — all
+  no-ops under the permissive default, so existing adapters are unaffected.
+- **Per-asset-class `RiskConfig` presets** — `RiskConfig::{crypto_perp,
+  crypto_spot, fx, futures, equity, preset_for}` plus `BotConfig::per_class_risk`
+  (`BotConfigBuilder::class_risk`). Each symbol resolves its effective config
+  (risk gates **and** sizing) per-symbol → per-class (keyed off
+  `instrument_spec().asset_class`) → default, so one bot trades crypto-perps /
+  FX / futures side by side with class-correct leverage and limits.
+- **`JsonFileStore` (`rustrade` facade)** — the first durable `StateStore`: an
+  atomic (temp-file + rename), write-through JSON-file backend. With
+  `Bot::with_state_store`, per-symbol risk state (session-PnL halt + breaker)
+  survives a restart; the portfolio halt re-derives from the restored per-symbol
+  PnLs via the sweep. (Adds the `fs` tokio feature to the facade.)
+
 ### Changed
 - **Facade integration tests now use deterministic virtual time
   (Tier 2 resilience).** Every timing-dependent test across
