@@ -188,10 +188,12 @@ multipliers, parameter overrides) are all resolved in code — see the
 Milestones below are **dependency order, not a calendar**. The active focus is
 0.2 (live-trading hardening); the rest is captured so nothing is lost.
 
-## 0.1.1 — cut the patch release (½ day)
+## 0.1.1 — superseded (never cut)
 
-The `[Unreleased]` block in `CHANGELOG.md:10` already holds real, shipped
-hardening (resilience tiers). Stamp it so downstream git-dep users can pin it.
+**Reconciled:** 0.1.1 was never tagged; the hardening went straight into the 0.2
+line and then **0.3.0** (`main` is at the `chore: release 0.3.0` commit, matching
+crates.io `rustrade-framework` 0.3.0). The remaining release-hygiene chore is just
+git tags (`v0.2.x` / `v0.3.0`) + README/CHANGELOG sync. The items below are moot.
 
 - [ ] Promote `CHANGELOG.md` `[Unreleased]` → `[0.1.1]` with the date; open a
       fresh `[Unreleased]`.
@@ -203,11 +205,17 @@ hardening (resilience tiers). Stamp it so downstream git-dep users can pin it.
       toolchain can fail a component re-sync; `stable` is the fallback) in
       `CONTRIBUTING.md`.
 
-## 0.2 — Live-trading hardening  ◀ NEXT UP
+## 0.2 — Live-trading hardening — ✅ SHIPPED (in the 0.2.x line; `main` is now 0.3.0)
 
-The gap between "passes tests" and "safe to run real money." Each track is
-independently reviewable. Together they close the production holes and unblock
-porting a real strategy (e.g. the kucoin SAR bot) on top of the facade.
+**Reconciled:** all four tracks landed and were verified against the code —
+0.2a `StateStore`+`JsonFileStore` (`json_store.rs`, `Bot::with_state_store`),
+0.2b rich order intents (`Decision::{order_kind, limit_price, stop_price,
+take_profit_price}` honoured in `execution.rs`), 0.2c `OrderTracker` + lifecycle
+(`order_tracker.rs`), 0.2d per-symbol `RiskConfig` + multi-brain arbitration
+(`risk_state.rs`, `Brain::owned_symbols()`). The detailed `[ ]` items below are
+kept as historical record. **One genuine remainder:** the backtest fill-mirror
+(the last 0.2b bullet) depends on the still-open 0.4a "limit-order fills in the
+engine" — track it there, not here.
 
 ### 0.2a — Persistence (`StateStore`)
 
