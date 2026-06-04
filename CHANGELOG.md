@@ -9,6 +9,10 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.3.0] - 2026-06-01
+
 ### Added — multi-asset risk layer (account-level + asset-class)
 - **`PortfolioRisk` (`rustrade-risk`)** — account-wide risk complementing the
   per-symbol gates: a latching daily-loss halt (net realised PnL summed across
@@ -39,6 +43,18 @@ workspace moves as one until any single crate needs to diverge.
   survives a restart; the portfolio halt re-derives from the restored per-symbol
   PnLs via the sweep. (Adds the `fs` tokio feature to the facade.)
 
+### Added — execution & order management
+- **SL+TP bracket orders with OCO sibling cancellation.** A `Decision` can
+  attach a stop-loss and take-profit; the execution service places them as a
+  linked pair and cancels the sibling when either fills (one-cancels-other), so
+  a bracketed position can't leave a dangling resting order.
+- **Per-symbol `RiskConfig` overrides.** `BotConfig` can carry a distinct
+  `RiskConfig` per symbol (the precursor to the per-asset-class resolution
+  added above), so one bot runs symbols at different risk budgets.
+- **Multi-brain-per-symbol arbitration via `owned_symbols`.** A bot can run
+  several `Brain`s, each declaring the symbols it owns; events route only to the
+  owning brain, so independent strategies share one bot without cross-talk.
+
 ### Changed
 - **Facade integration tests now use deterministic virtual time
   (Tier 2 resilience).** Every timing-dependent test across
@@ -53,7 +69,30 @@ workspace moves as one until any single crate needs to diverge.
   50× locally with zero failures; the suite now completes in
   milliseconds instead of seconds.
 
+## [0.2.1] - 2026-05-31
+
 ### Added
+- **Order lifecycle tracking — `OrderTracker` + TTL reaper + reconciliation.**
+  Submitted orders are tracked through their lifecycle; a TTL reaper cancels
+  orders that linger unfilled past a deadline, and a reconciliation pass
+  realigns local order/position state with the exchange's view on reconnect.
+
+### Fixed
+- Made the `order_tracking` integration tests slow-runner-proof (removed
+  fixed-iteration settles that could flake on a slow CI runner).
+
+## [0.2.0] - 2026-05-31
+
+### Added — risk-state persistence & order semantics
+- **`StateStore` trait + persistence wiring.** Session-PnL halt and
+  circuit-breaker state are read/written through a `StateStore` so risk state
+  survives a restart (0.1 was in-memory only; the durable file-backed
+  `JsonFileStore` impl arrived in 0.3.0). Adds `SymbolRiskSnapshot` (serde).
+- **`Decision` stops + order kinds honoured end-to-end.** The execution service
+  now acts on a `Decision`'s stop price and order kind (market/limit) through to
+  the exchange adapter, instead of treating every decision as a bare market order.
+
+### Added — backtest robustness (Tier 1 / Tier 2)
 - **Brain-panic isolation test.** `tests/brain_panic.rs` proves a
   `Brain` that panics inside `on_event` unwinds only its own supervised
   `ExecutionService` task — a sibling brain keeps processing and the bot

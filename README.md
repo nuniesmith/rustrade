@@ -5,13 +5,13 @@ service lifecycle, supervision, risk primitives, buses, traits — that every
 trading bot rewrites from scratch. Plug in your own exchange adapter,
 indicator stack, and strategy (`Brain`) and you get a production-ready bot.
 
-> **Status: 0.2.0, published on crates.io.** All five crates are complete
+> **Status: 0.3.0, published on crates.io.** All five crates are complete
 > and tested — core, supervisor, risk, backtest, and the facade. CI is green
 > on Linux + macOS across MSRV (1.94.1) and stable, with ~91% line coverage.
 >
 > The facade is published as **`rustrade-framework`** (the bare `rustrade`
 > name on crates.io belongs to an unrelated project) but is still imported
-> as `rustrade` — add `rustrade-framework = "0.2"` to your `Cargo.toml` and
+> as `rustrade` — add `rustrade-framework = "0.3"` to your `Cargo.toml` and
 > write `use rustrade::{Bot, BotConfig};` as usual.
 
 ---
@@ -167,16 +167,18 @@ crates and the four examples. The same five commands CI runs (`fmt`,
 
 ## What's next
 
-0.1.0 is feature-complete for embedded use. Post-0.1 candidates, roughly in
+The framework is published on crates.io (0.3.0) and is feature-complete for
+embedded, multi-asset use. Shipped since 0.1.0 (see [`CHANGELOG.md`](./CHANGELOG.md)):
+crates.io publish, a `StateStore` trait with a durable `JsonFileStore` (risk
+state survives restarts), `Decision` stops + order kinds, order lifecycle
+tracking, SL/TP bracket (OCO) orders, multi-brain arbitration, and an
+account-level + per-asset-class risk layer. Remaining candidates, roughly in
 priority order (see [`TODO.md`](./TODO.md) for the full list):
 
-1. **Publish to crates.io** in dependency order (core → supervisor → risk →
-   backtest → rustrade).
-2. **A `StateStore` trait** so session PnL and breaker state survive restarts
-   (0.1 is in-memory only).
-3. **Backtest depth:** Parquet loader, book-walk slippage (needs order-book
-   replay), expectancy / avg-win-loss metrics.
-4. **A reference exchange adapter** in its own crate, demonstrating the
+1. **Backtest depth:** Parquet loader, book-walk slippage (needs order-book
+   replay), expectancy / avg-win-loss metrics, and mirroring live limit-fill
+   semantics in the simulated exchange.
+2. **A reference exchange adapter** in its own crate, demonstrating the
    `ExchangeClient` / `MarketSource` / `FillSource` contracts end-to-end.
 
 Explicit non-goals for now: an HTTP/gRPC control plane, a built-in indicator
