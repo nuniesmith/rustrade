@@ -94,7 +94,7 @@ pub(crate) mod risk_state;
 pub(crate) mod risk_sweep;
 pub mod services;
 
-pub use bot::{Bot, BotConfig, BotConfigBuilder, RiskConfig};
+pub use bot::{Bot, BotConfig, BotConfigBuilder, BracketFailurePolicy, RiskConfig};
 pub use handle::{BotHandle, BotHealth, BrainHealthSnapshot};
 pub use json_store::JsonFileStore;
 pub use order_tracker::{OcoRegistry, OrderReaperService, OrderTracker, TrackedOrder};

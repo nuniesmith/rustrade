@@ -49,11 +49,13 @@ impl Brain for BracketBrain {
 }
 
 /// Captures every placed order, advertises StopOrders + OrderTracking, and
-/// records cancels.
+/// records cancels. Optionally rejects protective legs of a given
+/// [`StopKind`] so the bracket failure paths can be exercised.
 struct BracketExchange {
     placed: Mutex<Vec<Order>>,
     cancels: Arc<Mutex<Vec<String>>>,
     next_id: AtomicU64,
+    fail_stop_kind: Mutex<Option<StopKind>>,
 }
 impl BracketExchange {
     fn new() -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
@@ -63,12 +65,17 @@ impl BracketExchange {
                 placed: Mutex::new(Vec::new()),
                 cancels: cancels.clone(),
                 next_id: AtomicU64::new(0),
+                fail_stop_kind: Mutex::new(None),
             }),
             cancels,
         )
     }
     fn placed_snapshot(&self) -> Vec<Order> {
         self.placed.lock().unwrap().clone()
+    }
+    /// Reject any order carrying a stop attachment of this kind.
+    fn fail_stop_kind(&self, kind: StopKind) {
+        *self.fail_stop_kind.lock().unwrap() = Some(kind);
     }
 }
 #[async_trait]
@@ -77,6 +84,13 @@ impl ExchangeClient for BracketExchange {
         "bracket-ex"
     }
     async fn place_order(&self, o: &Order) -> Result<String> {
+        if let (Some(stop), Some(fail)) = (o.stop, *self.fail_stop_kind.lock().unwrap())
+            && stop.kind == fail
+        {
+            return Err(rustrade::Error::exchange(
+                "synthetic protective-leg rejection",
+            ));
+        }
         let n = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         self.placed.lock().unwrap().push(o.clone());
         Ok(format!("ord-{n}"))
@@ -302,6 +316,167 @@ async fn no_fill_source_falls_back_to_single_stop() {
         .expect("fallback attaches a single stop-loss");
     assert!(matches!(stop.kind, StopKind::StopMarket));
     assert_eq!(stop.trigger_price, Price(90.0));
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+// ── Bracket failure handling ────────────────────────────────────────────
+
+/// Build a bracket-capable bot over `exchange` with an optional policy.
+fn bracket_bot(
+    exchange: Arc<BracketExchange>,
+    policy: Option<rustrade::BracketFailurePolicy>,
+) -> (rustrade::Bot, mpsc::UnboundedSender<Fill>) {
+    let (fill_tx, fill_rx) = mpsc::unbounded_channel();
+    let fills = Arc::new(ChannelFills {
+        rx: AsyncMutex::new(fill_rx),
+    });
+    let mut builder = BotConfig::builder()
+        .name("bracket-fail")
+        .symbol("BTCUSDT")
+        .without_signal_handler()
+        .shutdown_timeout(Duration::from_secs(2))
+        .sizing_config(SizingConfig {
+            margin_per_trade: 100.0,
+            leverage: 1,
+            max_contracts: 10,
+        });
+    if let Some(p) = policy {
+        builder = builder.bracket_failure_policy(p);
+    }
+    let bot = Bot::new(
+        builder.build().unwrap(),
+        exchange,
+        vec![BracketBrain::new()],
+    )
+    .unwrap()
+    .with_fill_source(fills);
+    (bot, fill_tx)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sl_leg_failure_closes_entry_by_default() {
+    // The stop-loss leg is rejected → the entry has no protection → the
+    // default policy (CloseEntry) closes it with a reduce-only market order.
+    let (exchange, _cancels) = BracketExchange::new();
+    exchange.fail_stop_kind(StopKind::StopMarket);
+
+    let (bot, _fill_tx) = bracket_bot(exchange.clone(), None);
+    let bus = bot.market_data_bus().clone();
+    let handle = bot.handle();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+
+    // Entry + the policy close = 2 accepted orders (the SL leg is rejected,
+    // the TP leg is never attempted).
+    let two = eventually(10, || {
+        if exchange.placed_snapshot().len() >= 2 {
+            true
+        } else {
+            bus.publish(candle_event("BTCUSDT", 100.0));
+            false
+        }
+    })
+    .await;
+    assert!(
+        two,
+        "expected entry + close, got {:?}",
+        exchange.placed_snapshot()
+    );
+
+    let orders = exchange.placed_snapshot();
+    assert_eq!(orders.len(), 2, "entry + policy close only: {orders:?}");
+    assert_eq!(orders[0].side, Side::Buy, "entry");
+    assert!(orders[0].stop.is_none());
+    // The close: opposite side, reduce-only, same size, no stop attachment.
+    assert_eq!(orders[1].side, Side::Sell, "policy close");
+    assert!(orders[1].reduce_only, "close must be reduce-only");
+    assert!(orders[1].stop.is_none());
+    assert_eq!(orders[1].size, orders[0].size);
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_unprotected_policy_leaves_entry_open() {
+    let (exchange, _cancels) = BracketExchange::new();
+    exchange.fail_stop_kind(StopKind::StopMarket);
+
+    let (bot, _fill_tx) = bracket_bot(
+        exchange.clone(),
+        Some(rustrade::BracketFailurePolicy::KeepUnprotected),
+    );
+    let bus = bot.market_data_bus().clone();
+    let handle = bot.handle();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+
+    let placed = eventually(10, || {
+        if !exchange.placed_snapshot().is_empty() {
+            true
+        } else {
+            bus.publish(candle_event("BTCUSDT", 100.0));
+            false
+        }
+    })
+    .await;
+    assert!(placed, "entry should be placed");
+    // Give any close order a beat to (erroneously) appear.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let orders = exchange.placed_snapshot();
+    assert_eq!(
+        orders.len(),
+        1,
+        "KeepUnprotected must not close the entry: {orders:?}"
+    );
+    assert_eq!(orders[0].side, Side::Buy);
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tp_leg_failure_keeps_stop_loss() {
+    // The take-profit leg is rejected → the stop-loss is KEPT (degraded to
+    // stop-only protection), not cancelled.
+    let (exchange, cancels) = BracketExchange::new();
+    exchange.fail_stop_kind(StopKind::TakeProfit);
+
+    let (bot, _fill_tx) = bracket_bot(exchange.clone(), None);
+    let bus = bot.market_data_bus().clone();
+    let handle = bot.handle();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+
+    let two = eventually(10, || {
+        if exchange.placed_snapshot().len() >= 2 {
+            true
+        } else {
+            bus.publish(candle_event("BTCUSDT", 100.0));
+            false
+        }
+    })
+    .await;
+    assert!(
+        two,
+        "expected entry + SL, got {:?}",
+        exchange.placed_snapshot()
+    );
+    // Give any cancel / extra order a beat to (erroneously) appear.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let orders = exchange.placed_snapshot();
+    assert_eq!(orders.len(), 2, "entry + kept SL: {orders:?}");
+    let sl = &orders[1];
+    assert!(sl.reduce_only && sl.side == Side::Sell);
+    assert!(
+        matches!(sl.stop.map(|s| s.kind), Some(StopKind::StopMarket)),
+        "the surviving leg must be the stop-loss"
+    );
+    assert!(
+        cancels.lock().unwrap().is_empty(),
+        "the stop-loss must NOT be cancelled when only the TP leg fails"
+    );
 
     handle.shutdown();
     let _ = tokio::time::timeout(Duration::from_secs(3), task).await;

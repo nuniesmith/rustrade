@@ -149,6 +149,29 @@ impl RiskConfig {
     }
 }
 
+/// What the execution service does when a bracket entry has been filled
+/// but its protective stop-loss leg could not be placed.
+///
+/// A bracket entry is placed *before* its SL + TP legs (the legs are
+/// reduce-only and need the position to exist). If the stop-loss leg is
+/// then rejected, the bot is holding a position with none of the
+/// protection the brain asked for. This policy decides what happens next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum BracketFailurePolicy {
+    /// Immediately close the entry with a reduce-only market order
+    /// (default). The brain asked for a protected position; if the
+    /// framework can't protect it, it doesn't hold it. If the close
+    /// itself fails, an error is logged — at that point manual
+    /// intervention is required.
+    #[default]
+    CloseEntry,
+    /// Keep the position open and log an error. Use when the host has
+    /// its own protective layer (e.g. exchange-side account stops) and
+    /// an unprotected entry is acceptable.
+    KeepUnprotected,
+}
+
 /// Configuration for a [`Bot`].
 ///
 /// Construct via [`BotConfig::builder`]. The builder validates every
@@ -226,6 +249,10 @@ pub struct BotConfig {
     /// the per-symbol [`RiskConfig`] gates. Defaults to all-off (opt-in), so
     /// a bot that doesn't set it behaves exactly as before.
     pub portfolio: PortfolioRiskConfig,
+    /// What to do when a bracket entry fills but its protective stop-loss
+    /// leg fails to place. Defaults to [`BracketFailurePolicy::CloseEntry`]:
+    /// the unprotected entry is closed with a reduce-only market order.
+    pub bracket_failure_policy: BracketFailurePolicy,
 }
 
 impl BotConfig {
@@ -268,6 +295,7 @@ pub struct BotConfigBuilder {
     per_symbol_risk: HashMap<Symbol, RiskConfig>,
     per_class_risk: HashMap<AssetClass, RiskConfig>,
     portfolio: PortfolioRiskConfig,
+    bracket_failure_policy: Option<BracketFailurePolicy>,
 }
 
 impl BotConfigBuilder {
@@ -364,6 +392,14 @@ impl BotConfigBuilder {
     /// ```
     pub fn portfolio_config(mut self, cfg: PortfolioRiskConfig) -> Self {
         self.portfolio = cfg;
+        self
+    }
+
+    /// Set the [`BracketFailurePolicy`] — what happens when a bracket entry
+    /// fills but its protective stop-loss leg fails to place. Defaults to
+    /// [`BracketFailurePolicy::CloseEntry`].
+    pub fn bracket_failure_policy(mut self, policy: BracketFailurePolicy) -> Self {
+        self.bracket_failure_policy = Some(policy);
         self
     }
 
@@ -485,6 +521,7 @@ impl BotConfigBuilder {
             per_symbol_risk: self.per_symbol_risk,
             per_class_risk: self.per_class_risk,
             portfolio: self.portfolio,
+            bracket_failure_policy: self.bracket_failure_policy.unwrap_or_default(),
         })
     }
 }
@@ -940,6 +977,7 @@ impl Bot {
             sizing,
             order_tracker: order_tracking_active.then(|| self.order_tracker.clone()),
             oco: oco.clone(),
+            bracket_failure_policy: self.config.bracket_failure_policy,
         };
 
         for brain in self.brains.iter() {
