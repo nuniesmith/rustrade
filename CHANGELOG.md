@@ -9,6 +9,14 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+### Changed — version bumped to 0.4.0 (unreleased)
+- `workspace.package.version` → **0.4.0**: the unreleased changes below
+  include API additions that are breaking for struct-literal construction
+  (`BotConfig.bracket_failure_policy`, `BacktestResult.orders_blocked`), so
+  the next publish is 0.4.0. Bumping on `main` keeps the new
+  `cargo-semver-checks` CI job green until a genuinely unflagged breaking
+  change appears.
+
 ### Added — CI + packaging hygiene
 - **`cargo-semver-checks` CI job** (advisory, `continue-on-error`) — flags
   public-API changes that need a version bump before the next publish.

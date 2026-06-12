@@ -5,7 +5,8 @@ service lifecycle, supervision, risk primitives, buses, traits — that every
 trading bot rewrites from scratch. Plug in your own exchange adapter,
 indicator stack, and strategy (`Brain`) and you get a production-ready bot.
 
-> **Status: 0.3.0, published on crates.io.** All five crates are complete
+> **Status: 0.4.0 in development; 0.3.0 is the latest crates.io release.**
+> All five crates are complete
 > and tested — core, supervisor, risk, backtest, and the facade. CI is green
 > on Linux + macOS across MSRV (1.94.1) and stable, with ~91% line coverage.
 >
