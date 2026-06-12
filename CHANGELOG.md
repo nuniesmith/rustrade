@@ -9,6 +9,23 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+### Added — backtest risk-gate parity
+- **Risk gates in the replay engine** — `BacktestConfig::{session_pnl,
+  circuit_breaker}` (builder: `.session_pnl(cfg)` / `.circuit_breaker(cfg)`)
+  thread the same per-symbol `SessionPnlConfig` / `CircuitBreakerConfig` the
+  live bot runs into the backtest. The engine applies the live gate sequence
+  (session halt, then breaker, blocking **every** non-`Hold` decision —
+  including `Close` — exactly like `ExecutionService`) and feeds each
+  realised `TradeOutcome` back into the gates, mirroring
+  `FillRoutingService`'s auto-PnL. Time is driven by candle timestamps
+  through a `ManualClock`, so the daily halt rolls over at 00:00 UTC in
+  *replay* time and the breaker window/cooldown run on candle time — runs
+  stay fully deterministic. Both gates default to off; existing backtests
+  are unchanged.
+- **`BacktestResult::orders_blocked`** — count of decisions a risk gate
+  blocked (also shown in `summary()`). `#[serde(default)]`, so previously
+  serialized results still deserialize.
+
 ### Added — live-safety hardening
 - **`BracketFailurePolicy`** — configurable handling for a bracket entry whose
   protective stop-loss leg fails to place

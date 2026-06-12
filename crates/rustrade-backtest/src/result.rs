@@ -25,6 +25,13 @@ pub struct BacktestResult {
     /// Number of orders the engine placed (may be `< signals_emitted`
     /// if the sizer returned 0 for some signals).
     pub orders_filled: usize,
+    /// Number of non-`Hold` decisions blocked by a risk gate (the
+    /// session-PnL halt or the circuit breaker — see
+    /// [`crate::BacktestConfig::session_pnl`] /
+    /// [`crate::BacktestConfig::circuit_breaker`]). Always `0` when no
+    /// gate is configured.
+    #[serde(default)]
+    pub orders_blocked: usize,
     /// Per-trade outcomes, in chronological order.
     pub trades: Vec<TradeOutcome>,
     /// Maximum peak-to-trough drawdown of equity (cash) over the run,
@@ -187,7 +194,7 @@ impl BacktestResult {
         format!(
             "Backtest [{}]\n\
              ├ candles_processed: {}\n\
-             ├ signals / orders : {} / {}\n\
+             ├ signals / orders : {} / {} ({} risk-blocked)\n\
              ├ trades           : {} (W {} / L {} / BE {})\n\
              ├ win_rate         : {:.2}%\n\
              ├ profit_factor    : {pf}\n\
@@ -201,6 +208,7 @@ impl BacktestResult {
             self.candles_processed,
             self.signals_emitted,
             self.orders_filled,
+            self.orders_blocked,
             self.trades.len(),
             self.wins(),
             self.losses(),
@@ -235,6 +243,7 @@ mod tests {
             candles_processed: period_returns.len(),
             signals_emitted: 0,
             orders_filled: 0,
+            orders_blocked: 0,
             trades: Vec::new(),
             max_drawdown: 0.0,
             equity_curve: equity,
