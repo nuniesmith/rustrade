@@ -93,9 +93,12 @@ on MSRV (1.94.1) + stable.
       volume / multi-process access.
 
 ### D — Backtest fidelity for live order types (so a risk brain backtests as it trades)
-- [ ] **Apply the risk gates in backtest.** The engine ignores
-      `SessionPnl`/`CircuitBreaker` today, so a backtest won't reproduce live
-      gating. Thread `RiskConfig` through `BacktestConfig` + engine.
+- [x] **Apply the risk gates in backtest.** `BacktestConfig::{session_pnl,
+      circuit_breaker}` thread the live per-symbol gate configs into the
+      engine; gates run in the live order (blocking `Close` too), fed from
+      every `TradeOutcome`, on candle-driven `ManualClock` time (UTC
+      rollover + breaker cooldown in replay time). Blocked decisions are
+      counted in `BacktestResult::orders_blocked`. *(Shipped.)*
 - [ ] **Honour limit/stop fills** (today taker-at-close) + **funding model** for
       perps + **portfolio-level metrics** (expectancy, avg win/loss, per-asset).
       (Overlaps 0.4a/0.4b — called out here because it's load-bearing for

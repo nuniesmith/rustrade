@@ -17,6 +17,18 @@
 //! number source and no thread interleaving — the loop is single-threaded
 //! and synchronous through every step that affects state.
 //!
+//! # Risk-gate parity with live
+//!
+//! The live `ExecutionService` blocks decisions behind a per-symbol
+//! session-PnL halt and circuit breaker. Thread the same configs through
+//! [`BacktestConfig::session_pnl`] / [`BacktestConfig::circuit_breaker`]
+//! and the replay engine applies the same gates — driven by **candle
+//! time** (the daily halt rolls over at 00:00 UTC in replay time, the
+//! breaker's window and cooldown run on candle timestamps), so a brain
+//! that relies on live gating backtests the way it trades. Blocked
+//! decisions are counted in [`BacktestResult::orders_blocked`]. Both
+//! gates default to off.
+//!
 //! # Status
 //!
 //! Phase 4b — adds CSV candle loader, Sharpe/Sortino metrics, and

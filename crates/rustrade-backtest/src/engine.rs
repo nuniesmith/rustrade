@@ -21,7 +21,8 @@ use rustrade_core::{
     Brain, Candle, Decision, Exchange, Fill, MarketDataEvent, OrderKind, Position, Side,
     SignalType, SizeHint, Symbol,
 };
-use rustrade_risk::PositionSizer;
+use rustrade_risk::clock::ManualClock;
+use rustrade_risk::{CircuitBreaker, PositionSizer, SessionPnl};
 
 use crate::config::BacktestConfig;
 use crate::error::{Error, Result};
@@ -132,9 +133,46 @@ impl Backtest {
         );
         let mut signals_emitted = 0usize;
         let mut orders_filled = 0usize;
+        let mut orders_blocked = 0usize;
         let mut trades: Vec<TradeOutcome> = Vec::new();
 
+        // Per-symbol risk gates (session-PnL halt + circuit breaker),
+        // mirroring the live execution path's gate sequence. Time is
+        // driven by candle timestamps through a shared `ManualClock`, so
+        // the UTC-midnight rollover and the breaker's window/cooldown run
+        // on replay time and the run stays deterministic.
+        let risk_clock = Arc::new(ManualClock::new(0));
+        let mut risk: BTreeMap<Symbol, SymbolRisk> = BTreeMap::new();
+        if self.config.session_pnl.is_some() || self.config.circuit_breaker.is_some() {
+            for s in &self.config.symbols {
+                risk.insert(
+                    s.clone(),
+                    SymbolRisk {
+                        session: self
+                            .config
+                            .session_pnl
+                            .clone()
+                            .map(|c| SessionPnl::with_clock(s.as_str(), c, risk_clock.clone())),
+                        breaker: self
+                            .config
+                            .circuit_breaker
+                            .clone()
+                            .map(|c| CircuitBreaker::with_clock(c, risk_clock.clone())),
+                    },
+                );
+            }
+        }
+
         for (symbol, candle) in &merged {
+            // Advance replay time and roll the risk state over before any
+            // decision on this candle — the live counterpart is the
+            // periodic `RiskSweepService` tick.
+            if !risk.is_empty() {
+                risk_clock.set(candle.time.max(0) as u64 / 1_000);
+                if let Some(r) = risk.get_mut(symbol) {
+                    r.tick();
+                }
+            }
             let event = MarketDataEvent::Candle {
                 exchange: exchange.clone(),
                 symbol: symbol.clone(),
@@ -160,6 +198,22 @@ impl Backtest {
                 continue;
             }
             signals_emitted += 1;
+
+            // ── Risk gates (parity with the live ExecutionService) ────
+            // Gate 1: session-PnL halt; gate 2: circuit breaker. Like
+            // live, these block *every* non-Hold decision — including
+            // `Close` — after the signal is counted.
+            if let Some(r) = risk.get(symbol)
+                && (r
+                    .session
+                    .as_ref()
+                    .is_some_and(SessionPnl::is_session_halted)
+                    || r.breaker.as_ref().is_some_and(CircuitBreaker::is_tripped))
+            {
+                orders_blocked += 1;
+                state.sample_step(symbol, candle.close, self.config.contract_value);
+                continue;
+            }
 
             // Translate the decision into a concrete fill request. For
             // `Close` we use the existing position size. For Buy/Sell we
@@ -206,6 +260,7 @@ impl Backtest {
 
             // Update position state. If this fill reduces or flips the
             // position, emit one or more TradeOutcomes.
+            let trades_before = trades.len();
             apply_fill(
                 &mut state,
                 symbol,
@@ -217,6 +272,24 @@ impl Backtest {
                 candle_time(candle),
                 &mut trades,
             );
+
+            // Feed each realised close into the risk gates — the live
+            // counterpart is `FillRoutingService`'s auto-PnL recording.
+            if let Some(r) = risk.get_mut(symbol) {
+                for t in &trades[trades_before..] {
+                    if let Some(session) = &mut r.session {
+                        session.record_close(t.gross_pnl, t.fee);
+                    }
+                    if let Some(breaker) = &mut r.breaker {
+                        let net = t.net_pnl();
+                        if net > 0.0 {
+                            breaker.record_win();
+                        } else if net < 0.0 {
+                            breaker.record_loss();
+                        }
+                    }
+                }
+            }
 
             orders_filled += 1;
 
@@ -261,6 +334,7 @@ impl Backtest {
             candles_processed,
             signals_emitted,
             orders_filled,
+            orders_blocked,
             trades,
             max_drawdown: returns.max_drawdown,
             equity_curve: returns.equity,
@@ -268,6 +342,25 @@ impl Backtest {
             risk_free_rate: self.config.risk_free_rate,
             periods_per_year: self.config.periods_per_year,
         })
+    }
+}
+
+/// Per-symbol risk gates for replay: the same primitives the live bot
+/// runs, time-driven by the shared replay clock.
+struct SymbolRisk {
+    session: Option<SessionPnl>,
+    breaker: Option<CircuitBreaker>,
+}
+
+impl SymbolRisk {
+    /// Roll both primitives forward to the current replay time.
+    fn tick(&mut self) {
+        if let Some(s) = &mut self.session {
+            s.tick();
+        }
+        if let Some(b) = &mut self.breaker {
+            b.tick();
+        }
     }
 }
 

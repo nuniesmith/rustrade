@@ -1,7 +1,7 @@
 //! Backtest configuration + builder.
 
 use rustrade_core::Symbol;
-use rustrade_risk::SizingConfig;
+use rustrade_risk::{CircuitBreakerConfig, SessionPnlConfig, SizingConfig};
 
 use crate::error::{Error, Result};
 use crate::fees::FeeModel;
@@ -57,6 +57,21 @@ pub struct BacktestConfig {
     /// candles use `252` (trading days), for hourly `24 * 252`, for
     /// minute `60 * 24 * 365`, etc. Defaults to `252`.
     pub periods_per_year: u32,
+    /// Per-symbol session-PnL halt applied during replay — the same gate
+    /// the live `ExecutionService` checks first. When set, each symbol
+    /// gets its own `SessionPnl` driven by **candle time** (so the daily
+    /// halt rolls over at 00:00 UTC in replay time, not wall time), fed
+    /// from every emitted `TradeOutcome`. Once the net session PnL hits
+    /// `loss_limit`, further non-`Hold` decisions for that symbol are
+    /// blocked (counted in `BacktestResult::orders_blocked`) until the
+    /// next UTC day. `None` (the default) disables the gate — existing
+    /// backtests are unaffected.
+    pub session_pnl: Option<SessionPnlConfig>,
+    /// Per-symbol circuit breaker applied during replay — the live
+    /// execution path's second gate. Sliding-window loss counting and the
+    /// cooldown both run on **candle time**. `None` (the default)
+    /// disables the gate.
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
 }
 
 impl BacktestConfig {
@@ -95,6 +110,8 @@ pub struct BacktestConfigBuilder {
     contract_value: Option<f64>,
     risk_free_rate: Option<f64>,
     periods_per_year: Option<u32>,
+    session_pnl: Option<SessionPnlConfig>,
+    circuit_breaker: Option<CircuitBreakerConfig>,
 }
 
 impl BacktestConfigBuilder {
@@ -153,6 +170,20 @@ impl BacktestConfigBuilder {
         self.periods_per_year = Some(n);
         self
     }
+    /// Enable the per-symbol session-PnL halt during replay (off by
+    /// default). Use the same [`SessionPnlConfig`] the live bot runs with
+    /// so the backtest reproduces live gating.
+    pub fn session_pnl(mut self, cfg: SessionPnlConfig) -> Self {
+        self.session_pnl = Some(cfg);
+        self
+    }
+    /// Enable the per-symbol circuit breaker during replay (off by
+    /// default). Use the same [`CircuitBreakerConfig`] the live bot runs
+    /// with so the backtest reproduces live gating.
+    pub fn circuit_breaker(mut self, cfg: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker = Some(cfg);
+        self
+    }
 
     /// Validate and build. Returns `Error::Config` on any constraint
     /// violation.
@@ -186,6 +217,16 @@ impl BacktestConfigBuilder {
                 "BacktestConfig.periods_per_year must be > 0".into(),
             ));
         }
+        // Mirror BotConfig's validation: a NaN loss limit would make
+        // every halt comparison silently false (a disabled gate that
+        // looks enabled).
+        if let Some(sp) = &self.session_pnl
+            && sp.loss_limit.is_nan()
+        {
+            return Err(Error::Config(
+                "BacktestConfig.session_pnl.loss_limit must not be NaN".into(),
+            ));
+        }
         Ok(BacktestConfig {
             symbols: self.symbols,
             initial_cash,
@@ -195,6 +236,8 @@ impl BacktestConfigBuilder {
             contract_value,
             risk_free_rate,
             periods_per_year,
+            session_pnl: self.session_pnl,
+            circuit_breaker: self.circuit_breaker,
         })
     }
 }
