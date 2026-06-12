@@ -27,6 +27,7 @@ use rustrade_core::{
 use rustrade_supervisor::{RestartPolicy, TradingService};
 use tokio_util::sync::CancellationToken;
 
+use crate::pending::PendingEntryLedger;
 use crate::risk_state::{PositionCache, RiskPersister, RiskStateMap};
 
 // ───────────────────────────────────────────────────────────────────────
@@ -118,6 +119,7 @@ pub struct FillRoutingService {
     metrics: Arc<dyn MetricsSink>,
     persister: Option<RiskPersister>,
     oco: Option<crate::order_tracker::OcoRegistry>,
+    pending: PendingEntryLedger,
     fills_routed: AtomicU64,
     refresh_errors: AtomicU64,
     trades_recorded: AtomicU64,
@@ -135,6 +137,7 @@ impl FillRoutingService {
         metrics: Arc<dyn MetricsSink>,
         persister: Option<RiskPersister>,
         oco: Option<crate::order_tracker::OcoRegistry>,
+        pending: PendingEntryLedger,
     ) -> Self {
         Self {
             source,
@@ -145,6 +148,7 @@ impl FillRoutingService {
             metrics,
             persister,
             oco,
+            pending,
             fills_routed: AtomicU64::new(0),
             refresh_errors: AtomicU64::new(0),
             trades_recorded: AtomicU64::new(0),
@@ -366,6 +370,10 @@ impl TradingService for FillRoutingService {
                             && p.entry_price.is_none_or(f64::is_finite) =>
                         {
                             self.positions.write().await.insert(symbol.clone(), p);
+                            // The position is visible in the cache now, so
+                            // the portfolio gate no longer needs the
+                            // pending-entry reservation for this symbol.
+                            self.pending.release(&symbol).await;
                             tracing::debug!(symbol = %symbol, qty = p.qty, "refreshed position");
                         }
                         Ok(p) => {

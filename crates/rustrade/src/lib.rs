@@ -90,6 +90,7 @@ pub mod handle;
 pub mod json_store;
 pub mod logging;
 pub mod order_tracker;
+pub(crate) mod pending;
 pub(crate) mod risk_state;
 pub(crate) mod risk_sweep;
 pub mod services;

@@ -31,6 +31,7 @@ use rustrade_supervisor::{RestartPolicy, TradingService};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
+use crate::pending::PendingEntryLedger;
 use crate::risk_state::{PortfolioRiskState, PositionCache, RiskStateMap};
 
 /// Shared inputs every [`ExecutionService`] needs.
@@ -63,6 +64,11 @@ pub(crate) struct ExecutionContext {
     /// What to do when a bracket entry fills but its stop-loss leg fails
     /// to place (see [`BracketFailurePolicy`](crate::BracketFailurePolicy)).
     pub bracket_failure_policy: crate::bot::BracketFailurePolicy,
+    /// Outstanding entry reservations: orders that passed the portfolio
+    /// gate but whose fills aren't visible in the position cache yet.
+    /// Makes the gate check-and-reserve, so concurrent brains can't both
+    /// slip through `max_concurrent_positions` / `max_gross_exposure`.
+    pub pending: PendingEntryLedger,
 }
 
 /// Resolves the [`SizingConfig`] to use for a given symbol: a per-symbol
@@ -244,6 +250,11 @@ impl ExecutionService {
                 }
             }
             Err(e) => {
+                // An entry's portfolio reservation must not outlive the
+                // rejected order (exits never reserve).
+                if matches!(signal, SignalType::Buy | SignalType::Sell) {
+                    self.ctx.pending.release(&symbol).await;
+                }
                 tracing::error!(
                     service = %self.name,
                     symbol = %symbol,
@@ -255,12 +266,26 @@ impl ExecutionService {
         Ok(())
     }
 
-    /// Assemble the aggregate account state for the portfolio gate: open-position
-    /// count + gross exposure (Σ `|qty|·entry·contract_value`) and whether
-    /// `symbol` is already open, from the position cache; plus the account net
-    /// PnL (Σ per-symbol session net) from the risk map. `new_notional` is the
-    /// quote-currency size of the entry under consideration.
-    async fn portfolio_state(&self, symbol: &Symbol, new_notional: f64) -> PortfolioState {
+    /// Atomic portfolio gate: assemble the aggregate account state —
+    /// open-position count + gross exposure (Σ `|qty|·entry·contract_value`)
+    /// from the position cache **plus outstanding pending-entry
+    /// reservations**, and the account net PnL (Σ per-symbol session net)
+    /// from the risk map — run [`check_entry`](rustrade_risk::PortfolioRisk::check_entry),
+    /// and on success record this entry's reservation, all under the
+    /// ledger lock. Concurrent brains serialise here, so two entries
+    /// can't both slip through `max_concurrent_positions` or the
+    /// gross-exposure cap before either fill is visible.
+    ///
+    /// The caller owns the reservation's lifecycle: it is released on
+    /// exchange rejection (here, in `handle_event`), on the fill-driven
+    /// position-cache refresh (`FillRoutingService`), or by TTL.
+    async fn check_and_reserve_entry(
+        &self,
+        symbol: &Symbol,
+        new_notional: f64,
+    ) -> Result<(), rustrade_risk::PortfolioBlock> {
+        let mut pending = self.ctx.pending.lock().await;
+
         let (open_positions, gross_exposure, symbol_already_open) = {
             let positions = self.ctx.positions.read().await;
             let mut open = 0u32;
@@ -273,20 +298,33 @@ impl ExecutionService {
                 let px = p.entry_price.unwrap_or(0.0);
                 gross += p.qty.abs() * px * self.ctx.exchange.contract_value(sym);
             }
-            let already = positions.get(symbol).is_some_and(|p| !p.is_flat());
-            (open, gross, already)
+            let cache_open = |s: &Symbol| positions.get(s).is_some_and(|p| !p.is_flat());
+            // Reservations whose symbol is already open in the cache add
+            // exposure but no new concurrency slot — same rule the gate
+            // applies to the entry under consideration.
+            let open = open + pending.new_slots(cache_open);
+            let already = cache_open(symbol) || pending.contains(symbol);
+            (open, gross + pending.gross_notional(), already)
         };
         let account_net_pnl = {
             let risk = self.ctx.risk.read().await;
             risk.values().map(|sr| sr.session_pnl.net_pnl()).sum()
         };
-        PortfolioState {
-            open_positions,
-            gross_exposure,
-            new_notional,
-            symbol_already_open,
-            account_net_pnl,
-        }
+
+        self.ctx
+            .portfolio
+            .read()
+            .await
+            .check_entry(PortfolioState {
+                open_positions,
+                gross_exposure,
+                new_notional,
+                symbol_already_open,
+                account_net_pnl,
+            })?;
+
+        pending.reserve(symbol.clone(), new_notional);
+        Ok(())
     }
 
     async fn build_order(
@@ -343,21 +381,7 @@ impl ExecutionService {
                 }
                 let size = Volume(contracts as f64);
 
-                // ── Gate 3: account-wide portfolio risk (entries only) ─
-                // Exits (the Close arm) are never gated here — only new risk.
                 let new_notional = f64::from(contracts) * price.value() * contract_value;
-                let pf_state = self.portfolio_state(symbol, new_notional).await;
-                if let Err(block) = self.ctx.portfolio.read().await.check_entry(pf_state) {
-                    self.orders_blocked.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(
-                        service = %self.name,
-                        symbol = %symbol,
-                        signal = %decision.signal,
-                        reason = %block,
-                        "decision blocked: portfolio risk"
-                    );
-                    return None;
-                }
 
                 // ── Instrument min-notional gate ──────────────────────
                 // Skip a dust order the venue would reject. No-op when the
@@ -391,6 +415,24 @@ impl ExecutionService {
                         ?kind,
                         required = ?cap,
                         "decision blocked: adapter does not support requested order kind"
+                    );
+                    return None;
+                }
+
+                // ── Gate 3: account-wide portfolio risk (entries only) ─
+                // Exits (the Close arm) are never gated here — only new
+                // risk. Runs LAST so the reservation it records is only
+                // taken when the order is actually about to be placed;
+                // the reservation is released on rejection, on the
+                // fill-driven cache refresh, or by TTL.
+                if let Err(block) = self.check_and_reserve_entry(symbol, new_notional).await {
+                    self.orders_blocked.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        service = %self.name,
+                        symbol = %symbol,
+                        signal = %decision.signal,
+                        reason = %block,
+                        "decision blocked: portfolio risk"
                     );
                     return None;
                 }
