@@ -1,0 +1,33 @@
+name: fuzz
+
+# Weekly coverage-guided fuzzing of the CSV candle loader (the fuzz crate
+# is excluded from the stable workspace — see fuzz/Cargo.toml). Scheduled
+# rather than per-PR: libFuzzer needs nightly + ASan and a time budget
+# that would drag every PR, while the proptest suite already runs the
+# same loader on every push.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    name: cargo fuzz (load_csv)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz
+          workspaces: fuzz
+      - uses: taiki-e/install-action@cargo-fuzz
+      - name: Fuzz the CSV loader for 5 minutes
+        run: cargo +nightly fuzz run load_csv -- -max_total_time=300
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          retention-days: 30

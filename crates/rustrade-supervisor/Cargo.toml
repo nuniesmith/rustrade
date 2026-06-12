@@ -11,6 +11,11 @@ readme     = "README.md"
 keywords   = ["supervisor", "tokio", "trading", "lifecycle"]
 categories = ["asynchronous", "concurrency"]
 
+# docs.rs builds with every feature on, so the prometheus-gated API is
+# documented (annotated with its required feature via doc_cfg).
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 # Publish supervisor metrics to a global Prometheus registry.
 # Off by default — downstream binaries opt in if they want Prometheus.

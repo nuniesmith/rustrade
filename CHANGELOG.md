@@ -9,6 +9,18 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+### Added — CI + packaging hygiene
+- **`cargo-semver-checks` CI job** (advisory, `continue-on-error`) — flags
+  public-API changes that need a version bump before the next publish.
+- **Weekly fuzz workflow** (`.github/workflows/fuzz.yml`) — runs the
+  `load_csv` libFuzzer target for 5 minutes every Monday (and on demand via
+  `workflow_dispatch`), uploading crash artifacts on failure.
+- **Default-features test pass** in CI — catches code that only compiles
+  under `--all-features`.
+- **docs.rs metadata** (`all-features = true`) for the two feature-gated
+  crates (`rustrade-supervisor`, `rustrade-framework`) so the
+  prometheus-gated APIs are documented.
+
 ### Fixed — portfolio gate race under concurrent brains
 - **Pending-entry reservations.** The portfolio gate read only the position
   cache, which doesn't reflect an order until its fill is processed — so two

@@ -11,6 +11,11 @@ readme     = "README.md"
 keywords   = ["trading", "crypto", "bot", "framework"]
 categories = ["asynchronous", "api-bindings"]
 
+# docs.rs builds with every feature on, so the prometheus-gated re-exports
+# are documented.
+[package.metadata.docs.rs]
+all-features = true
+
 # The crates.io package is `rustrade-framework` (the bare `rustrade` name is
 # taken by an unrelated project), but the library is imported as `rustrade`
 # — so downstream code is `use rustrade::{Bot, ...}` and every doc/example
