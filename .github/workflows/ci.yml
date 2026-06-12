@@ -74,6 +74,27 @@ jobs:
         with:
           key: stable
       - run: cargo test --workspace --all-features
+      # Default-features pass: catches code that only compiles when an
+      # optional feature happens to be on (the matrix jobs all run
+      # --all-features, so they'd never see it).
+      - run: cargo test --workspace
+
+  semver:
+    name: cargo-semver-checks
+    runs-on: ubuntu-latest
+    # Advisory (continue-on-error): compares the public API against the
+    # latest crates.io release and flags changes that need a version
+    # bump. Breaking changes batch up between 0.x releases by design, so
+    # a red check here means "bump the version before publishing", not
+    # "this PR is broken" — it must not block merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: semver
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
 
   doc:
     name: cargo doc
