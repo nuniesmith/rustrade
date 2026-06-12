@@ -206,6 +206,22 @@ impl FillRoutingService {
             0.0
         };
 
+        // The fill itself is validated at ingestion, but `entry` comes from
+        // the position cache (ultimately `exchange.get_position`) and could
+        // still be non-finite. A NaN fed into `record_close` would disable
+        // the loss-limit gate, so refuse it here.
+        if !gross.is_finite() || !fee_share.is_finite() {
+            tracing::error!(
+                symbol = %fill.symbol,
+                gross,
+                fee_share,
+                entry,
+                "auto-PnL: computed non-finite realised PnL — NOT recorded \
+                 (risk gates unchanged)"
+            );
+            return;
+        }
+
         // Update the per-symbol risk state directly.
         let recorded = {
             let mut map = self.risk.write().await;
@@ -225,9 +241,20 @@ impl FillRoutingService {
                 );
                 true
             } else {
-                tracing::debug!(
+                // A fill the risk layer never sees: its losses won't count
+                // toward the session PnL halt or the circuit breaker. Loud
+                // by design — this usually means a symbol was traded that
+                // isn't in `BotConfig.symbols`.
+                self.metrics.counter(
+                    "rustrade_unrecorded_fills_total",
+                    &[("symbol", fill.symbol.as_str())],
+                    1,
+                );
+                tracing::warn!(
                     symbol = %fill.symbol,
-                    "auto-PnL: symbol not in risk-state map (was it configured?)"
+                    "auto-PnL: fill for a symbol not in the risk-state map — \
+                     realised PnL NOT recorded by any risk gate \
+                     (is it missing from BotConfig.symbols?)"
                 );
                 false
             }
@@ -268,6 +295,29 @@ impl TradingService for FillRoutingService {
                         tracing::info!("fill source closed; exiting");
                         return Ok(());
                     };
+
+                    // Ingestion-boundary validation: a non-finite price /
+                    // size / fee would poison the weighted-average PnL and
+                    // — because every NaN comparison is false — silently
+                    // disable the session-PnL halt. Drop the fill entirely
+                    // (not routed, not recorded) and say so loudly.
+                    if !fill_is_finite(&fill) {
+                        self.metrics.counter(
+                            "rustrade_invalid_fills_total",
+                            &[("symbol", fill.symbol.as_str())],
+                            1,
+                        );
+                        tracing::error!(
+                            symbol = %fill.symbol,
+                            order_id = %fill.order_id,
+                            price = fill.price.value(),
+                            size = fill.size.value(),
+                            fee = fill.fee,
+                            "fill source produced a non-finite fill — dropped \
+                             (not routed to brains, not recorded in risk state)"
+                        );
+                        continue;
+                    }
 
                     let symbol = fill.symbol.clone();
 
@@ -312,9 +362,24 @@ impl TradingService for FillRoutingService {
 
                     // Refresh position cache from the exchange.
                     match self.exchange.get_position(&symbol).await {
-                        Ok(p) => {
+                        Ok(p) if p.qty.is_finite()
+                            && p.entry_price.is_none_or(f64::is_finite) =>
+                        {
                             self.positions.write().await.insert(symbol.clone(), p);
                             tracing::debug!(symbol = %symbol, qty = p.qty, "refreshed position");
+                        }
+                        Ok(p) => {
+                            // A non-finite qty/entry would poison every
+                            // PnL computed from the cache — keep the old
+                            // snapshot instead.
+                            self.refresh_errors.fetch_add(1, Ordering::Relaxed);
+                            self.metrics.inc("rustrade_position_refresh_errors_total");
+                            tracing::error!(
+                                symbol = %symbol,
+                                qty = p.qty,
+                                entry = ?p.entry_price,
+                                "exchange returned a non-finite position — cache NOT updated"
+                            );
                         }
                         Err(e) => {
                             self.refresh_errors.fetch_add(1, Ordering::Relaxed);
@@ -337,6 +402,15 @@ impl TradingService for FillRoutingService {
             }
         }
     }
+}
+
+/// Every numeric field a [`Fill`] carries must be finite (and the size
+/// non-negative) before the framework will route or record it.
+fn fill_is_finite(f: &Fill) -> bool {
+    f.price.value().is_finite()
+        && f.size.value().is_finite()
+        && f.size.value() >= 0.0
+        && f.fee.is_finite()
 }
 
 // ───────────────────────────────────────────────────────────────────────

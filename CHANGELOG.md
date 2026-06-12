@@ -9,7 +9,36 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added — live-safety hardening
+- **`BracketFailurePolicy`** — configurable handling for a bracket entry whose
+  protective stop-loss leg fails to place
+  (`BotConfigBuilder::bracket_failure_policy`). The default, `CloseEntry`,
+  immediately closes the unprotected entry with a reduce-only market order
+  (previously the position was left resting with only an error log);
+  `KeepUnprotected` opts back into log-and-keep for hosts with their own
+  protective layer.
+- **`rustrade_invalid_fills_total` / `rustrade_unrecorded_fills_total`
+  metrics** — counters for fills dropped at the ingestion boundary and fills
+  whose realised PnL could not be attributed to a configured symbol.
+
+### Changed — bracket degradation + risk-state poisoning guards
+- **Take-profit leg failure now keeps the stop-loss.** Previously a TP-leg
+  rejection cancelled the already-placed SL "to avoid an orphan", leaving the
+  entry with no protection at all. The SL (reduce-only, so safe to rest) is now
+  kept and the bracket degrades to stop-only protection, mirroring the
+  `attach_protection` fallback.
+- **Non-finite fills are dropped at the boundary.** `FillRoutingService` now
+  rejects fills with a non-finite price/size/fee (or negative size) before they
+  are routed to brains or recorded — a NaN reaching `SessionPnl::record_close`
+  made the accumulated PnL NaN and silently disabled the loss-limit halt
+  (every NaN comparison is false). `BotHandle::record_trade_outcome` rejects
+  non-finite PnL the same way, the computed gross/fee in the auto-PnL path is
+  re-checked, and a non-finite position returned by `get_position` no longer
+  overwrites the cache.
+- **Fills for unconfigured symbols now warn.** A realised PnL that no risk
+  gate will ever see was previously logged at debug level; it is now a
+  `warn` with a counter, since it usually means a symbol is missing from
+  `BotConfig.symbols`.
 
 ## [0.3.0] - 2026-06-01
 

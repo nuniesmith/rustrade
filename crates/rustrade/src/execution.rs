@@ -60,6 +60,9 @@ pub(crate) struct ExecutionContext {
     /// then gets two reduce-only protective orders registered as an OCO
     /// pair here; the `FillRoutingService` cancels the sibling on fill.
     pub oco: Option<crate::order_tracker::OcoRegistry>,
+    /// What to do when a bracket entry fills but its stop-loss leg fails
+    /// to place (see [`BracketFailurePolicy`](crate::BracketFailurePolicy)).
+    pub bracket_failure_policy: crate::bot::BracketFailurePolicy,
 }
 
 /// Resolves the [`SizingConfig`] to use for a given symbol: a per-symbol
@@ -443,8 +446,17 @@ impl ExecutionService {
 
     /// Place the two reduce-only protective legs for a bracket entry and
     /// register them as an OCO pair. Called after the market entry is
-    /// accepted. Best-effort: if the second leg fails to place, the first is
-    /// cancelled so no orphaned protective order is left resting.
+    /// accepted.
+    ///
+    /// # Failure handling
+    ///
+    /// - **Stop-loss leg fails:** the entry has no protection at all, so
+    ///   the configured [`BracketFailurePolicy`](crate::BracketFailurePolicy)
+    ///   applies — by default the entry is closed with a reduce-only
+    ///   market order.
+    /// - **Take-profit leg fails:** the stop-loss is **kept** (the
+    ///   position stays loss-protected) and the bracket degrades to
+    ///   stop-only, mirroring [`Self::attach_protection`]'s fallback.
     async fn place_brackets(
         &self,
         symbol: &Symbol,
@@ -465,15 +477,37 @@ impl ExecutionService {
         let sl_id = match self.ctx.exchange.place_order(&sl_order).await {
             Ok(id) => id,
             Err(e) => {
-                tracing::error!(service = %self.name, symbol = %symbol, error = %e, "bracket: stop-loss leg failed to place; entry is UNPROTECTED");
+                tracing::error!(
+                    service = %self.name,
+                    symbol = %symbol,
+                    error = %e,
+                    policy = ?self.ctx.bracket_failure_policy,
+                    "bracket: stop-loss leg failed to place — entry has no protection"
+                );
+                self.handle_unprotected_entry(symbol, entry_side, size)
+                    .await;
                 return;
             }
         };
         let tp_id = match self.ctx.exchange.place_order(&tp_order).await {
             Ok(id) => id,
             Err(e) => {
-                tracing::error!(service = %self.name, symbol = %symbol, error = %e, "bracket: take-profit leg failed; cancelling the stop-loss leg to avoid an orphan");
-                let _ = self.ctx.exchange.cancel_order(symbol, &sl_id).await;
+                // The stop-loss is live, so the position is still
+                // loss-protected — keep it and degrade to stop-only
+                // rather than cancelling the SL and leaving the entry
+                // with nothing.
+                tracing::warn!(
+                    service = %self.name,
+                    symbol = %symbol,
+                    error = %e,
+                    sl_id = %sl_id,
+                    "bracket: take-profit leg failed; keeping the stop-loss \
+                     (degraded to stop-only protection)"
+                );
+                if let Some(tracker) = &self.ctx.order_tracker {
+                    tracker.record(sl_id.clone(), &sl_order).await;
+                }
+                self.orders_placed.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
@@ -495,6 +529,47 @@ impl ExecutionService {
             tp_id = %tp_id,
             "bracket placed (SL + TP, OCO-linked)"
         );
+    }
+
+    /// Apply the configured [`BracketFailurePolicy`](crate::BracketFailurePolicy)
+    /// to a bracket entry whose stop-loss leg could not be placed.
+    async fn handle_unprotected_entry(&self, symbol: &Symbol, entry_side: Side, size: Volume) {
+        use crate::bot::BracketFailurePolicy;
+        match self.ctx.bracket_failure_policy {
+            BracketFailurePolicy::CloseEntry => {
+                let close = Order::market(symbol.clone(), entry_side.opposite(), size)
+                    .with_reduce_only(true);
+                match self.ctx.exchange.place_order(&close).await {
+                    Ok(id) => {
+                        self.orders_placed.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            service = %self.name,
+                            symbol = %symbol,
+                            close_id = %id,
+                            "bracket: closed the unprotected entry (BracketFailurePolicy::CloseEntry)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            service = %self.name,
+                            symbol = %symbol,
+                            error = %e,
+                            "bracket: FAILED to close the unprotected entry — \
+                             an unprotected position is resting on the exchange; \
+                             manual intervention required"
+                        );
+                    }
+                }
+            }
+            BracketFailurePolicy::KeepUnprotected => {
+                tracing::error!(
+                    service = %self.name,
+                    symbol = %symbol,
+                    "bracket: entry left open WITHOUT protection \
+                     (BracketFailurePolicy::KeepUnprotected)"
+                );
+            }
+        }
     }
 
     /// Attach a **single** protective [`StopAttachment`] to the entry order,

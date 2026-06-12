@@ -162,9 +162,26 @@ impl BotHandle {
     /// the symbol's `SessionPnl` and records a win/loss on the
     /// `CircuitBreaker` based on the **net** PnL.
     ///
+    /// Non-finite `gross_pnl` / `fee` values are **rejected** (logged at
+    /// error level, risk state unchanged) — a NaN would otherwise make
+    /// the accumulated PnL NaN and permanently disable the loss-limit
+    /// gate.
+    ///
     /// Phase 2b does not automate this from the fill stream — that's
     /// `FillRoutingService` territory in Phase 2c.
     pub async fn record_trade_outcome(&self, symbol: &Symbol, gross_pnl: f64, fee: f64) {
+        // A NaN fed into `record_close` makes the accumulated PnL NaN, and
+        // every subsequent `net_pnl() <= loss_limit` comparison false — the
+        // session halt would silently never fire again. Reject it loudly.
+        if !gross_pnl.is_finite() || !fee.is_finite() {
+            tracing::error!(
+                symbol = %symbol,
+                gross_pnl,
+                fee,
+                "record_trade_outcome: non-finite PnL rejected — risk state unchanged"
+            );
+            return;
+        }
         {
             let mut map = self.risk.write().await;
             let Some(risk) = map.get_mut(symbol) else {
