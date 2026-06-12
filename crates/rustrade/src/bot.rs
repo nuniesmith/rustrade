@@ -33,6 +33,12 @@ const DEFAULT_SIGNAL_BUS_CAPACITY: usize = 256;
 /// latch. Coarse on purpose — these are day-scale controls.
 const RISK_SWEEP_CADENCE: Duration = Duration::from_secs(15);
 
+/// How long a pending-entry reservation counts against the portfolio gate
+/// before it expires. Long enough for any realistic market-order fill →
+/// position-cache refresh round trip; short enough that a setup without a
+/// fill source (whose cache never updates) recovers on its own.
+const PENDING_ENTRY_TTL: Duration = Duration::from_secs(30);
+
 /// Risk-layer config for a symbol: session-PnL cap, circuit breaker, and
 /// position sizing. Used both as the bot-wide default
 /// ([`BotConfig::risk`]) and as a per-symbol override
@@ -967,6 +973,10 @@ impl Bot {
         // (reads it) and the risk sweep (maintains its daily-loss latch).
         let portfolio: PortfolioRiskState = build_portfolio_risk(self.config.portfolio.clone());
 
+        // Pending-entry reservations shared by every execution service and
+        // the fill router — makes the portfolio gate check-and-reserve.
+        let pending = crate::pending::PendingEntryLedger::new(PENDING_ENTRY_TTL);
+
         let ctx = ExecutionContext {
             exchange: self.exchange.clone(),
             bus: self.market_bus.clone(),
@@ -978,6 +988,7 @@ impl Bot {
             order_tracker: order_tracking_active.then(|| self.order_tracker.clone()),
             oco: oco.clone(),
             bracket_failure_policy: self.config.bracket_failure_policy,
+            pending: pending.clone(),
         };
 
         for brain in self.brains.iter() {
@@ -1026,6 +1037,7 @@ impl Bot {
                     self.metrics.clone(),
                     persister.clone(),
                     oco.clone(),
+                    pending.clone(),
                 )));
         }
 

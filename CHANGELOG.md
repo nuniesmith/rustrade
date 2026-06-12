@@ -9,6 +9,19 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+### Fixed — portfolio gate race under concurrent brains
+- **Pending-entry reservations.** The portfolio gate read only the position
+  cache, which doesn't reflect an order until its fill is processed — so two
+  brains deciding concurrently could *both* pass `max_concurrent_positions` /
+  `max_gross_exposure` and both place. The gate is now **check-and-reserve**:
+  under a shared ledger lock it assembles the aggregate state (cache **plus**
+  outstanding reservations), runs `check_entry`, and records the new entry's
+  reservation. Reservations are released when the exchange rejects the order,
+  when the fill-driven position-cache refresh makes the position visible, or
+  after a 30 s TTL (the safety net for setups without a fill source). The
+  portfolio gate now runs *after* the min-notional and order-kind gates so a
+  reservation is only taken for an order actually about to be placed.
+
 ### Added — backtest risk-gate parity
 - **Risk gates in the replay engine** — `BacktestConfig::{session_pnl,
   circuit_breaker}` (builder: `.session_pnl(cfg)` / `.circuit_breaker(cfg)`)
