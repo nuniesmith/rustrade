@@ -9,13 +9,17 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
-### Changed — version bumped to 0.4.0 (unreleased)
-- `workspace.package.version` → **0.4.0**: the unreleased changes below
-  include API additions that are breaking for struct-literal construction
-  (`BotConfig.bracket_failure_policy`, `BacktestResult.orders_blocked`), so
-  the next publish is 0.4.0. Bumping on `main` keeps the new
-  `cargo-semver-checks` CI job green until a genuinely unflagged breaking
-  change appears.
+## [0.4.0] - 2026-06-14
+
+Live-safety and execution-correctness release. The 0.3 → 0.4 work hardens the
+live order path (a configurable bracket-failure policy plus non-finite fill
+guards), brings the backtest engine to risk-gate parity with the live bot,
+closes a portfolio-gate check-and-reserve race that let concurrent brains both
+pass the same cap, and tightens CI/packaging hygiene. The additions are
+breaking for struct-literal construction
+(`BotConfig.bracket_failure_policy`, `BacktestResult.orders_blocked`), hence
+the minor bump; the builder APIs and serde round-trips stay
+backward-compatible.
 
 ### Added — CI + packaging hygiene
 - **`cargo-semver-checks` CI job** (advisory, `continue-on-error`) — flags
@@ -631,5 +635,9 @@ Pre-release skeleton. See [`TODO.md`](./TODO.md) for the 0.1.0 ship criteria.
 - `rustrade-backtest` — directory reserved; not yet populated.
 - `rustrade` (facade) — directory reserved; not yet populated.
 
-[Unreleased]: https://github.com/nuniesmith/rustrade/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nuniesmith/rustrade/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/nuniesmith/rustrade/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/nuniesmith/rustrade/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/nuniesmith/rustrade/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/nuniesmith/rustrade/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nuniesmith/rustrade/releases/tag/v0.1.0
