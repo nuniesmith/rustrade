@@ -23,17 +23,21 @@ Scope reminder (revisited 2026-05):
 
 ## Status snapshot
 
-`main` is at **0.2.1** (`workspace.package.version`, all internal path-deps,
+`main` is at **0.4.0** (`workspace.package.version`, all internal path-deps,
 and `Cargo.lock` agree; facade publishes as `rustrade-framework`). ~200 tests
 (unit + integration + doc + proptest + fuzz + 3 chaos) pass on stable;
 `clippy -D warnings` clean; `cargo doc --no-deps` clean. CI runs Linux + macOS
-on MSRV (1.94.1) + stable.
+on MSRV (1.94.1) + stable, plus advisory `cargo-semver-checks` and a weekly
+fuzz job.
 
-> ⚠️ **Docs lag the code.** `README.md:8-11` says "0.2.0"; `CHANGELOG.md` has no
-> `0.2.0`/`0.2.1` section and doesn't mention the three latest shipped features
-> (per-symbol risk, SL+TP brackets, multi-brain arbitration); there's no git
-> tag. **Do:** add the `0.2.0`/`0.2.1` CHANGELOG sections from git history, tag
-> `v0.2.1`, and fix the README status line.
+> **Release hygiene reconciled.** `CHANGELOG.md` now carries the
+> `0.2.0`/`0.2.1`/`0.3.0`/`0.4.0` sections (with compare links); `README.md`
+> reads "0.4.0 in development; 0.3.0 is the latest crates.io release"; the
+> `v0.2.1` and `v0.3.0` tags exist. The crates.io latest is `0.3.0`; **0.4.0
+> is prepared but not yet published** — the maintainer cuts it with
+> `./scripts/release.sh` (sets the version where needed, commits, tags `v0.4.0`,
+> pushes, and publishes all five crates in dependency order). Since
+> `Cargo.toml` is already at 0.4.0, no version argument is needed.
 
 | Crate                  | State    | Tests                    |
 | ---------------------- | -------- | ------------------------ |
@@ -66,7 +70,7 @@ on MSRV (1.94.1) + stable.
       tick size, lot size, min notional, **asset class**) returned by
       `ExchangeClient::instrument_spec`; the execution service sizes from it,
       enforces min-notional, and snaps limit prices to the tick. *(Shipped — see
-      "Shipped since 0.2".)* Remaining nicety: richer `Symbol` parsing.
+      "Shipped in 0.3.0".)* Remaining nicety: richer `Symbol` parsing.
 
 ### B — Portfolio / account-level risk (entirely absent today)
 > Every `SessionPnl` / `CircuitBreaker` is **per-symbol**. Trading more than one
@@ -136,9 +140,9 @@ Condensed — full detail is in `CHANGELOG.md` and the PR history (#1–#23).
 - **Phase 6** — docs (quickstart + 4 tutorials), CI (fmt/clippy/test/doc/deny),
   dependabot, `# Example` rustdoc on every public item, `cargo-llvm-cov`
   coverage in PR comments.
-- **Post-0.1 hardening (unreleased)** — virtual-time tests, brain-panic
-  isolation, CSV fuzzing, multi-symbol determinism fix, NaN/inf candle guards.
-  *(Not yet versioned — see 0.1.1 below.)*
+- **Post-0.1 hardening** — virtual-time tests, brain-panic isolation, CSV
+  fuzzing, multi-symbol determinism fix, NaN/inf candle guards. *(Shipped in
+  the 0.2.0 release section of `CHANGELOG.md`.)*
 
 The four original open design decisions (leverage, stop orders, contract
 multipliers, parameter overrides) are all resolved in code — see the
@@ -146,7 +150,7 @@ multipliers, parameter overrides) are all resolved in code — see the
 
 ---
 
-## Shipped since 0.2 (unreleased)
+## Shipped in 0.3.0 (multi-asset, on crates.io)
 
 - **Account-level `PortfolioRisk`** (`rustrade-risk`): an account-wide
   daily-loss halt (latching, with 00:00 UTC rollover), a max-concurrent-positions
@@ -182,7 +186,7 @@ multipliers, parameter overrides) are all resolved in code — see the
 
 > These land the framework side of the FKS multi-asset risk roadmap (Tracks 2.1,
 > 2.2, 2.3, 2.4, 2.5) — the **class-aware risk layer is complete and durable**.
-> Bots consume it once a new `rustrade-framework` is published.
+> Published in `rustrade-framework` 0.3.0; the 0.4.0 hardening builds on it.
 
 ---
 
@@ -194,9 +198,10 @@ Milestones below are **dependency order, not a calendar**. The active focus is
 ## 0.1.1 — superseded (never cut)
 
 **Reconciled:** 0.1.1 was never tagged; the hardening went straight into the 0.2
-line and then **0.3.0** (`main` is at the `chore: release 0.3.0` commit, matching
-crates.io `rustrade-framework` 0.3.0). The remaining release-hygiene chore is just
-git tags (`v0.2.x` / `v0.3.0`) + README/CHANGELOG sync. The items below are moot.
+line, then **0.3.0** (published to crates.io as `rustrade-framework` 0.3.0, tagged
+`v0.3.0`), and `main` is now at **0.4.0** (prepared, not yet published). The old
+release-hygiene chore (CHANGELOG/README sync + the `v0.2.1`/`v0.3.0` tags) is
+done. The items below are moot.
 
 - [ ] Promote `CHANGELOG.md` `[Unreleased]` → `[0.1.1]` with the date; open a
       fresh `[Unreleased]`.
@@ -208,7 +213,7 @@ git tags (`v0.2.x` / `v0.3.0`) + README/CHANGELOG sync. The items below are moot
       toolchain can fail a component re-sync; `stable` is the fallback) in
       `CONTRIBUTING.md`.
 
-## 0.2 — Live-trading hardening — ✅ SHIPPED (in the 0.2.x line; `main` is now 0.3.0)
+## 0.2 — Live-trading hardening — ✅ SHIPPED (in the 0.2.x line; `main` is now 0.4.0)
 
 **Reconciled:** all four tracks landed and were verified against the code —
 0.2a `StateStore`+`JsonFileStore` (`json_store.rs`, `Bot::with_state_store`),
@@ -325,14 +330,26 @@ enables paper trading — all without binding to a real venue.
 
 Deferred from Phase 6c — design against a real publish target now.
 
-- [ ] `cargo publish` driver: publish in dependency order (core → supervisor →
-      risk → backtest → rustrade), gated on a clean tag.
-- [ ] `cargo-semver-checks` in CI to catch accidental breaking changes to the
-      public ABI before they ship.
+- [x] `cargo publish` driver: publish in dependency order (core → supervisor →
+      risk → backtest → rustrade). *(Shipped — `scripts/release.sh`: reads the
+      version from `[workspace.package]` (never a tag), bumps the internal
+      path-deps in lockstep, `cargo check`s, commits, tags `vX.Y.Z`, pushes, and
+      publishes each crate in dependency order, waiting on the sparse index
+      between crates. Idempotent — already-published crates are skipped — and
+      carries a `--dry-run` rehearsal mode.)*
+- [x] `cargo-semver-checks` in CI to catch accidental breaking changes to the
+      public ABI before they ship. *(Shipped — advisory `semver` job in
+      `.github/workflows/ci.yml`, `continue-on-error`; flags an unbumped public
+      API change.)*
 - [ ] Release workflow (`.github/workflows/release.yml`): on tag, verify,
-      publish, attach `CHANGELOG` notes.
-- [ ] Update README install instructions from git-dep to `cargo add rustrade`
-      once live.
+      publish, attach `CHANGELOG` notes. *(Optional now — `scripts/release.sh`
+      already does the verify + dependency-ordered publish locally; this item is
+      just to move that into GitHub Actions on tag push if a hands-off pipeline
+      is wanted.)*
+- [x] Update README install instructions from git-dep to `cargo add rustrade`.
+      *(Done — `README.md` documents `rustrade-framework = "0.x"` / `cargo add
+      rustrade-framework`; bump the pinned minor to `0.4` once 0.4.0 is on
+      crates.io.)*
 
 ## 0.4 — Backtest & research depth
 
