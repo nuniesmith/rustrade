@@ -26,8 +26,10 @@ use rustrade_risk::{CircuitBreaker, PositionSizer, SessionPnl};
 
 use crate::config::BacktestConfig;
 use crate::error::{Error, Result};
+use crate::fees::FeeModel;
 use crate::metrics::TradeOutcome;
 use crate::result::BacktestResult;
+use crate::slippage::SlippageModel;
 
 /// The replay engine itself. Configure via [`BacktestConfig`], attach a
 /// [`Brain`] and one or more candle series, then `.run().await` for the
@@ -173,6 +175,34 @@ impl Backtest {
                     r.tick();
                 }
             }
+
+            // ── Resting protective brackets fill first ──────────────────────
+            // Before this candle's decision, fire any SL/TP leg whose level the
+            // candle's range crosses — the live counterpart is the exchange
+            // filling the reduce-only OCO legs placed at entry. A stop-out loss
+            // still feeds the risk gates, same as a manual close.
+            {
+                let before = trades.len();
+                if let Some(fill) = state.check_bracket(
+                    symbol,
+                    candle,
+                    self.config.fees,
+                    self.config.slippage,
+                    self.config.contract_value,
+                    candle_time(candle),
+                    &mut trades,
+                ) {
+                    if let Some(r) = risk.get_mut(symbol) {
+                        record_closes_into_risk(r, &trades[before..]);
+                    }
+                    orders_filled += 1;
+                    self.brain
+                        .on_fill(&fill)
+                        .await
+                        .map_err(|e| Error::Brain(e.to_string()))?;
+                }
+            }
+
             let event = MarketDataEvent::Candle {
                 exchange: exchange.clone(),
                 symbol: symbol.clone(),
@@ -276,19 +306,7 @@ impl Backtest {
             // Feed each realised close into the risk gates — the live
             // counterpart is `FillRoutingService`'s auto-PnL recording.
             if let Some(r) = risk.get_mut(symbol) {
-                for t in &trades[trades_before..] {
-                    if let Some(session) = &mut r.session {
-                        session.record_close(t.gross_pnl, t.fee);
-                    }
-                    if let Some(breaker) = &mut r.breaker {
-                        let net = t.net_pnl();
-                        if net > 0.0 {
-                            breaker.record_win();
-                        } else if net < 0.0 {
-                            breaker.record_loss();
-                        }
-                    }
-                }
+                record_closes_into_risk(r, &trades[trades_before..]);
             }
 
             orders_filled += 1;
@@ -310,6 +328,21 @@ impl Backtest {
                 .on_fill(&fill)
                 .await
                 .map_err(|e| Error::Brain(e.to_string()))?;
+
+            // Record a simulated OCO bracket for a freshly opened bracketed
+            // market entry (mirrors the live ExecutionService::place_brackets).
+            // It is fired intra-candle on later candles; cleared when flat.
+            if !resolved.is_close
+                && let (Some(sl), Some(tp)) = (decision.stop_price, decision.take_profit_price)
+            {
+                let pos = state.position(symbol).copied().unwrap_or(Position::FLAT);
+                if pos.qty != 0.0 {
+                    state.set_bracket(
+                        symbol,
+                        Bracket { stop: sl.value(), take_profit: tp.value(), long: pos.qty > 0.0 },
+                    );
+                }
+            }
 
             state.sample_step(symbol, candle.close, self.config.contract_value);
         }
@@ -412,6 +445,11 @@ struct State {
     // symbol's price has just changed. `BTreeMap` for the same
     // determinism reason as `positions`.
     last_marks: BTreeMap<Symbol, f64>,
+    // Simulated reduce-only OCO brackets (SL stop-market + TP) per open
+    // position — the backtest counterpart of the live
+    // `ExecutionService::place_brackets`: recorded when a bracketed market
+    // entry fills, fired intra-candle, cleared when the position goes flat.
+    brackets: BTreeMap<Symbol, Bracket>,
 }
 
 struct ReturnsSummary {
@@ -435,6 +473,7 @@ impl State {
             equity_curve: vec![initial_cash],
             period_returns: Vec::new(),
             last_marks: BTreeMap::new(),
+            brackets: BTreeMap::new(),
         }
     }
 
@@ -448,6 +487,70 @@ impl State {
 
     fn position_mut(&mut self, sym: &Symbol) -> &mut Position {
         self.positions.entry(sym.clone()).or_insert(Position::FLAT)
+    }
+
+    /// Record a protective OCO bracket for a freshly opened position.
+    fn set_bracket(&mut self, sym: &Symbol, bracket: Bracket) {
+        self.brackets.insert(sym.clone(), bracket);
+    }
+
+    /// Fire a resting protective bracket leg if this candle's range crosses
+    /// it, closing the whole position at the trigger price and emitting the
+    /// `TradeOutcome`. Pessimistic: when a single bar spans BOTH legs the
+    /// **stop** fills first. Stop-market reduce-only legs cross the spread, so
+    /// the fill is a taker and takes slippage; it fills at the trigger level
+    /// (the repo's fixed-level convention — gaps beyond it are not modelled).
+    /// Returns the synthetic [`Fill`] for the brain callback, or `None` if
+    /// nothing fired. Self-heals a stale bracket (flat or flipped position).
+    #[allow(clippy::too_many_arguments)]
+    fn check_bracket(
+        &mut self,
+        sym: &Symbol,
+        candle: &Candle,
+        fees: FeeModel,
+        slippage: SlippageModel,
+        contract_value: f64,
+        when: DateTime<Utc>,
+        trades: &mut Vec<TradeOutcome>,
+    ) -> Option<Fill> {
+        let bracket = self.brackets.get(sym).copied()?;
+        let pos = self.positions.get(sym).copied().unwrap_or(Position::FLAT);
+        // Stale guard: the position is flat, or has flipped to the other side.
+        if pos.qty == 0.0 || bracket.long != (pos.qty > 0.0) {
+            self.brackets.remove(sym);
+            return None;
+        }
+        let (trigger, close_side) = if bracket.long {
+            if candle.low <= bracket.stop {
+                (bracket.stop, Side::Sell)
+            } else if candle.high >= bracket.take_profit {
+                (bracket.take_profit, Side::Sell)
+            } else {
+                return None;
+            }
+        } else if candle.high >= bracket.stop {
+            (bracket.stop, Side::Buy)
+        } else if candle.low <= bracket.take_profit {
+            (bracket.take_profit, Side::Buy)
+        } else {
+            return None;
+        };
+        let fill_price = slippage.apply(close_side, trigger);
+        let qty = pos.qty.abs();
+        let fee = fees.fee_for(fill_price, qty * contract_value, true);
+        apply_fill(self, sym, close_side, qty, fill_price, fee, contract_value, when, trades);
+        self.brackets.remove(sym);
+        Some(Fill {
+            symbol: sym.clone(),
+            order_id: "bt-bracket".to_string(),
+            client_id: None,
+            side: close_side,
+            price: rustrade_core::Price(fill_price),
+            size: rustrade_core::Volume(qty),
+            fee,
+            fee_currency: "QUOTE".into(),
+            timestamp: when,
+        })
     }
 
     /// Record the latest close for a symbol, then sample portfolio
@@ -536,6 +639,41 @@ struct ResolvedOrder {
     /// Limit price (quote currency) for resting kinds; `None` for market
     /// and close orders.
     limit_price: Option<f64>,
+}
+
+/// A simulated reduce-only OCO bracket attached to an open position — the
+/// backtest counterpart of the live `ExecutionService::place_brackets` SL
+/// (stop-market) + TP legs. Whichever leg the candle range crosses first
+/// closes the whole position (one-cancels-the-other).
+#[derive(Clone, Copy)]
+struct Bracket {
+    /// Stop-loss trigger price.
+    stop: f64,
+    /// Take-profit trigger price.
+    take_profit: f64,
+    /// `true` when protecting a long (stop below entry, TP above); `false`
+    /// for a short (stop above, TP below).
+    long: bool,
+}
+
+/// Feed each realised close into a symbol's risk gates — the session-PnL
+/// halt and the consecutive-loss circuit breaker — exactly as the live
+/// `FillRoutingService` does. Shared by the manual-fill and bracket-fill
+/// paths so the two can never diverge.
+fn record_closes_into_risk(r: &mut SymbolRisk, closes: &[TradeOutcome]) {
+    for t in closes {
+        if let Some(session) = &mut r.session {
+            session.record_close(t.gross_pnl, t.fee);
+        }
+        if let Some(breaker) = &mut r.breaker {
+            let net = t.net_pnl();
+            if net > 0.0 {
+                breaker.record_win();
+            } else if net < 0.0 {
+                breaker.record_loss();
+            }
+        }
+    }
 }
 
 /// Resolve a `Decision` into a [`ResolvedOrder`].
