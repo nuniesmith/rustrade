@@ -14,7 +14,7 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: rustfmt
@@ -24,7 +24,7 @@ jobs:
     name: cargo clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: clippy
@@ -40,7 +40,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
       - name: Run tests (captured)
@@ -68,7 +68,7 @@ jobs:
     # on stable hit them. Single OS to keep CI cost down; the macOS
     # matrix already covers platform-portability against MSRV.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -89,7 +89,7 @@ jobs:
     # "this PR is broken" — it must not block merges.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -102,7 +102,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --all-features
@@ -111,7 +111,7 @@ jobs:
     name: cargo-deny (licences + dupes + advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           rust-version: 1.94.1
@@ -125,7 +125,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: llvm-tools-preview
