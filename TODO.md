@@ -54,7 +54,7 @@ fuzz job.
 
 > Driven by the cross-repo goal: a (janus) brain trading **multiple asset
 > classes under explicit risk rules** through this framework. See
-> `fks-full/docs/MULTI_ASSET_BRAIN_ROADMAP.md`. These items are **not** covered
+> `fks/docs/MULTI_ASSET_BRAIN_ROADMAP.md`. These items are **not** covered
 > by the 0.2–0.5 milestones below — the per-symbol risk tier and trait surface
 > are solid, but the portfolio/asset-class layer and a real exchange adapter are
 > greenfield. Sequenced by leverage.
