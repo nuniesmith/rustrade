@@ -28,7 +28,11 @@ struct BracketBrain {
 }
 impl BracketBrain {
     fn new(stop: f64, take_profit: f64) -> Arc<Self> {
-        Arc::new(Self { stop, take_profit, entered: Mutex::new(false) })
+        Arc::new(Self {
+            stop,
+            take_profit,
+            entered: Mutex::new(false),
+        })
     }
 }
 #[async_trait]
@@ -54,7 +58,14 @@ impl Brain for BracketBrain {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn c(i: i64, open: f64, high: f64, low: f64, close: f64) -> Candle {
-    Candle { time: i * 60_000, open, high, low, close, volume: 1.0 }
+    Candle {
+        time: i * 60_000,
+        open,
+        high,
+        low,
+        close,
+        volume: 1.0,
+    }
 }
 
 /// Build the backtest: price ~100 with margin 1000 / 1× / cv 1.0 → 10 contracts
@@ -64,7 +75,11 @@ async fn run(stop: f64, tp: f64, candles: Vec<Candle>) -> rustrade_backtest::Bac
         BacktestConfig::builder()
             .symbol("BTCUSDT")
             .initial_cash(10_000.0)
-            .sizing(SizingConfig { margin_per_trade: 1_000.0, leverage: 1, max_contracts: 100 })
+            .sizing(SizingConfig {
+                margin_per_trade: 1_000.0,
+                leverage: 1,
+                max_contracts: 100,
+            })
             .fees(FeeModel::Zero)
             .slippage(SlippageModel::Zero)
             .build()
@@ -82,19 +97,30 @@ async fn run(stop: f64, tp: f64, candles: Vec<Candle>) -> rustrade_backtest::Bac
 #[tokio::test(flavor = "multi_thread")]
 async fn take_profit_leg_fills_when_high_crosses() {
     // Enter at 100 (c0 close); c1 high 104 crosses the 103 take-profit.
-    let r = run(98.0, 103.0, vec![
-        c(0, 100.0, 100.0, 100.0, 100.0),
-        c(1, 100.0, 104.0, 100.0, 102.0),
-        c(2, 102.0, 102.0, 101.0, 101.0),
-    ])
+    let r = run(
+        98.0,
+        103.0,
+        vec![
+            c(0, 100.0, 100.0, 100.0, 100.0),
+            c(1, 100.0, 104.0, 100.0, 102.0),
+            c(2, 102.0, 102.0, 101.0, 101.0),
+        ],
+    )
     .await;
 
     assert_eq!(r.trades.len(), 1, "exactly one closed trade");
     assert_eq!(r.orders_filled, 2, "one entry + one bracket exit");
     let t = &r.trades[0];
     assert!((t.entry_price - 100.0).abs() < 1e-9);
-    assert!((t.exit_price - 103.0).abs() < 1e-9, "TP fill at the leg price");
-    assert!(t.gross_pnl > 0.0, "take-profit is a win, got {}", t.gross_pnl);
+    assert!(
+        (t.exit_price - 103.0).abs() < 1e-9,
+        "TP fill at the leg price"
+    );
+    assert!(
+        t.gross_pnl > 0.0,
+        "take-profit is a win, got {}",
+        t.gross_pnl
+    );
     // 10 contracts × (103 - 100) = +30, zero fees.
     assert!((r.net_pnl - 30.0).abs() < 1e-9, "net_pnl={}", r.net_pnl);
 }
@@ -102,17 +128,28 @@ async fn take_profit_leg_fills_when_high_crosses() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_leg_fills_when_low_crosses() {
     // Enter at 100; c1 low 97 crosses the 98 stop.
-    let r = run(98.0, 103.0, vec![
-        c(0, 100.0, 100.0, 100.0, 100.0),
-        c(1, 100.0, 100.0, 97.0, 98.0),
-    ])
+    let r = run(
+        98.0,
+        103.0,
+        vec![
+            c(0, 100.0, 100.0, 100.0, 100.0),
+            c(1, 100.0, 100.0, 97.0, 98.0),
+        ],
+    )
     .await;
 
     assert_eq!(r.trades.len(), 1);
     assert_eq!(r.orders_filled, 2);
     let t = &r.trades[0];
-    assert!((t.exit_price - 98.0).abs() < 1e-9, "stop fill at the leg price");
-    assert!(t.gross_pnl < 0.0, "stop-loss is a loss, got {}", t.gross_pnl);
+    assert!(
+        (t.exit_price - 98.0).abs() < 1e-9,
+        "stop fill at the leg price"
+    );
+    assert!(
+        t.gross_pnl < 0.0,
+        "stop-loss is a loss, got {}",
+        t.gross_pnl
+    );
     assert!((r.net_pnl + 20.0).abs() < 1e-9, "net_pnl={}", r.net_pnl); // 10 × (98-100)
 }
 
@@ -120,26 +157,37 @@ async fn stop_leg_fills_when_low_crosses() {
 async fn stop_fills_first_when_one_bar_spans_both_legs() {
     // c1 low 96 crosses the stop AND high 105 crosses the TP — pessimistic:
     // the stop fills first, so this is booked as a loss at 98.
-    let r = run(98.0, 103.0, vec![
-        c(0, 100.0, 100.0, 100.0, 100.0),
-        c(1, 100.0, 105.0, 96.0, 100.0),
-    ])
+    let r = run(
+        98.0,
+        103.0,
+        vec![
+            c(0, 100.0, 100.0, 100.0, 100.0),
+            c(1, 100.0, 105.0, 96.0, 100.0),
+        ],
+    )
     .await;
 
     assert_eq!(r.trades.len(), 1);
     let t = &r.trades[0];
-    assert!((t.exit_price - 98.0).abs() < 1e-9, "spanning bar resolves to the STOP");
+    assert!(
+        (t.exit_price - 98.0).abs() < 1e-9,
+        "spanning bar resolves to the STOP"
+    );
     assert!(t.gross_pnl < 0.0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn position_stays_open_when_neither_leg_is_touched() {
     // Range stays strictly between stop (98) and TP (103) → no bracket fill.
-    let r = run(98.0, 103.0, vec![
-        c(0, 100.0, 100.0, 100.0, 100.0),
-        c(1, 100.0, 102.0, 99.0, 101.0),
-        c(2, 101.0, 102.5, 99.5, 100.0),
-    ])
+    let r = run(
+        98.0,
+        103.0,
+        vec![
+            c(0, 100.0, 100.0, 100.0, 100.0),
+            c(1, 100.0, 102.0, 99.0, 101.0),
+            c(2, 101.0, 102.5, 99.5, 100.0),
+        ],
+    )
     .await;
 
     assert!(r.trades.is_empty(), "no exit → no closed trade");

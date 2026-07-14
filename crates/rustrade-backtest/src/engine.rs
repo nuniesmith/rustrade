@@ -339,7 +339,11 @@ impl Backtest {
                 if pos.qty != 0.0 {
                     state.set_bracket(
                         symbol,
-                        Bracket { stop: sl.value(), take_profit: tp.value(), long: pos.qty > 0.0 },
+                        Bracket {
+                            stop: sl.value(),
+                            take_profit: tp.value(),
+                            long: pos.qty > 0.0,
+                        },
                     );
                 }
             }
@@ -538,7 +542,17 @@ impl State {
         let fill_price = slippage.apply(close_side, trigger);
         let qty = pos.qty.abs();
         let fee = fees.fee_for(fill_price, qty * contract_value, true);
-        apply_fill(self, sym, close_side, qty, fill_price, fee, contract_value, when, trades);
+        apply_fill(
+            self,
+            sym,
+            close_side,
+            qty,
+            fill_price,
+            fee,
+            contract_value,
+            when,
+            trades,
+        );
         self.brackets.remove(sym);
         Some(Fill {
             symbol: sym.clone(),
