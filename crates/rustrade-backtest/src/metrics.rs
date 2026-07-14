@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 /// A single realised trade — open → close — recorded by the engine.
 ///
 /// `gross_pnl` is in quote currency, before `fee`. `net_pnl = gross_pnl
-/// - fee`. The "side" is the side of the *closing* fill (so a long
-/// position is closed with `Side::Sell`).
+/// - fee + funding`. The "side" is the side of the *closing* fill (so a
+/// long position is closed with `Side::Sell`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TradeOutcome {
     /// Symbol the trade was on.
@@ -30,14 +30,24 @@ pub struct TradeOutcome {
     pub gross_pnl: f64,
     /// Fee charged to this close, in quote currency.
     pub fee: f64,
+    /// Net perp funding cashflow attributed to the closed quantity over
+    /// its hold, in quote currency. Positive = the position collected
+    /// funding, negative = it paid. Always `0.0` when
+    /// [`FundingModel::None`](crate::FundingModel::None) (the default)
+    /// is configured. `#[serde(default)]` so results serialized before
+    /// funding modelling shipped still deserialize.
+    #[serde(default)]
+    pub funding: f64,
     /// When the close fill occurred.
     pub closed_at: DateTime<Utc>,
 }
 
 impl TradeOutcome {
-    /// Net of fees.
+    /// Net of fees and funding: `gross_pnl - fee + funding`. With
+    /// funding modelling off this is `gross_pnl - fee` exactly, as
+    /// before.
     pub fn net_pnl(&self) -> f64 {
-        self.gross_pnl - self.fee
+        self.gross_pnl - self.fee + self.funding
     }
 
     /// Win (`true`) / loss / breakeven on net PnL.

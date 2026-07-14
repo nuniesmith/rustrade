@@ -5,6 +5,22 @@
 //! updates a synthetic per-symbol position. On position-reducing fills
 //! (closes or flips) a [`TradeOutcome`] is emitted into the result.
 //!
+//! # Perp funding
+//!
+//! With a [`FundingModel`](crate::FundingModel) configured (off by
+//! default), settlements in
+//! the window `(previous_candle_time, candle_time]` are booked against
+//! each symbol's position *as it stood entering the candle*, before any
+//! bracket fill or decision on that candle: `cashflow = −sign(qty) ×
+//! rate × |qty| × contract_value × last_mark` (positive rate → longs
+//! pay, shorts receive). Cashflows land in cash immediately (so the
+//! equity curve carries them) and accrue against the open position; when
+//! the position closes the accrual is attributed to the emitted
+//! [`TradeOutcome`]s pro-rata by closed quantity. Funding does **not**
+//! feed the session-PnL risk gate (parity with live, which gates on
+//! trade gross − fee); it does flow into the circuit breaker's win/loss
+//! classification via `TradeOutcome::net_pnl`.
+//!
 //! # Multi-symbol replay
 //!
 //! Each candle is tagged with a symbol. The engine maintains independent
@@ -165,6 +181,12 @@ impl Backtest {
             }
         }
 
+        // Per-symbol previous candle timestamp — the funding settlement
+        // window for a candle is `(prev_time, candle_time]`, matching the
+        // live paper ledger's entry-exclusive / exit-inclusive accrual.
+        let funding_on = self.config.funding.is_enabled();
+        let mut last_seen: BTreeMap<Symbol, i64> = BTreeMap::new();
+
         for (symbol, candle) in &merged {
             // Advance replay time and roll the risk state over before any
             // decision on this candle — the live counterpart is the
@@ -173,6 +195,21 @@ impl Backtest {
                 risk_clock.set(candle.time.max(0) as u64 / 1_000);
                 if let Some(r) = risk.get_mut(symbol) {
                     r.tick();
+                }
+            }
+
+            // ── Perp funding settlements since this symbol's last candle ────
+            // Booked against the position as it stood entering the candle
+            // (so a position closed ON a settlement timestamp still pays it,
+            // and one opened exactly ON a settlement does not), at the
+            // last-known mark. Before a symbol's first candle the position
+            // is necessarily flat, so the missing window charges nothing.
+            if funding_on {
+                let prev = last_seen.insert(symbol.clone(), candle.time);
+                if let Some(prev_t) = prev {
+                    for (_, rate) in self.config.funding.settlements_between(prev_t, candle.time) {
+                        state.apply_funding(symbol, rate, self.config.contract_value);
+                    }
                 }
             }
 
@@ -224,7 +261,12 @@ impl Backtest {
             let in_config = state.has_symbol(symbol);
 
             if !in_config || matches!(decision.signal, SignalType::Hold) {
-                state.sample_step(symbol, candle.close, self.config.contract_value);
+                state.sample_step(
+                    symbol,
+                    candle.close,
+                    self.config.contract_value,
+                    candle.time,
+                );
                 continue;
             }
             signals_emitted += 1;
@@ -241,7 +283,12 @@ impl Backtest {
                     || r.breaker.as_ref().is_some_and(CircuitBreaker::is_tripped))
             {
                 orders_blocked += 1;
-                state.sample_step(symbol, candle.close, self.config.contract_value);
+                state.sample_step(
+                    symbol,
+                    candle.close,
+                    self.config.contract_value,
+                    candle.time,
+                );
                 continue;
             }
 
@@ -256,11 +303,21 @@ impl Backtest {
                 candle.close,
                 self.config.contract_value,
             ) else {
-                state.sample_step(symbol, candle.close, self.config.contract_value);
+                state.sample_step(
+                    symbol,
+                    candle.close,
+                    self.config.contract_value,
+                    candle.time,
+                );
                 continue;
             };
             if resolved.qty <= 0.0 {
-                state.sample_step(symbol, candle.close, self.config.contract_value);
+                state.sample_step(
+                    symbol,
+                    candle.close,
+                    self.config.contract_value,
+                    candle.time,
+                );
                 continue;
             }
 
@@ -272,7 +329,12 @@ impl Backtest {
             // that rest across candles or partially fill need an order book
             // (a 0.4a item).
             let Some((reference_price, is_taker)) = resolve_fill(&resolved, candle) else {
-                state.sample_step(symbol, candle.close, self.config.contract_value);
+                state.sample_step(
+                    symbol,
+                    candle.close,
+                    self.config.contract_value,
+                    candle.time,
+                );
                 continue;
             };
             // Slippage applies to taker fills (crossing the spread); a
@@ -348,11 +410,16 @@ impl Backtest {
                 }
             }
 
-            state.sample_step(symbol, candle.close, self.config.contract_value);
+            state.sample_step(
+                symbol,
+                candle.close,
+                self.config.contract_value,
+                candle.time,
+            );
         }
 
         let total_fees: f64 = trades.iter().map(|t| t.fee).sum();
-        let net_pnl: f64 = trades.iter().map(|t| t.net_pnl()).sum();
+        let trades_net: f64 = trades.iter().map(|t| t.net_pnl()).sum();
         let symbol_label = if self.config.symbols.len() == 1 {
             self.config.symbols[0].as_str().to_string()
         } else {
@@ -362,12 +429,19 @@ impl Backtest {
         };
 
         let returns = state.into_returns();
+        // Funding on positions still open at the end of the run is
+        // realised cash the trade ledger never sees — fold it into the
+        // headline PnL so `final_cash` agrees with the equity curve's
+        // cash component. Exactly `0.0` with funding off.
+        let net_pnl = trades_net + returns.open_funding;
         Ok(BacktestResult {
             symbol: symbol_label,
             initial_cash: self.config.initial_cash,
             final_cash: self.config.initial_cash + net_pnl,
             net_pnl,
             total_fees,
+            funding_received: returns.funding_received,
+            funding_paid: returns.funding_paid,
             candles_processed,
             signals_emitted,
             orders_filled,
@@ -375,6 +449,7 @@ impl Backtest {
             trades,
             max_drawdown: returns.max_drawdown,
             equity_curve: returns.equity,
+            equity_times: returns.equity_times,
             period_returns: returns.period_returns,
             risk_free_rate: self.config.risk_free_rate,
             periods_per_year: self.config.periods_per_year,
@@ -454,12 +529,30 @@ struct State {
     // `ExecutionService::place_brackets`: recorded when a bracketed market
     // entry fills, fired intra-candle, cleared when the position goes flat.
     brackets: BTreeMap<Symbol, Bracket>,
+    // Funding cashflow accrued against each *open* position (already in
+    // `cash`; tracked here so closes can attribute it to their
+    // `TradeOutcome`s). Cleared when the position goes flat or flips.
+    // `BTreeMap` for the same determinism reason as `positions`.
+    accrued_funding: BTreeMap<Symbol, f64>,
+    // Run-level funding totals: sums of the positive (received) and
+    // negative (paid, stored positive) settlement cashflows.
+    funding_received: f64,
+    funding_paid: f64,
+    // Candle timestamp of each equity sample; seeded alongside
+    // `equity_curve`'s initial-cash sample with the first candle's time.
+    equity_times: Vec<i64>,
 }
 
 struct ReturnsSummary {
     max_drawdown: f64,
     equity: Vec<f64>,
+    equity_times: Vec<i64>,
     period_returns: Vec<f64>,
+    funding_received: f64,
+    funding_paid: f64,
+    /// Funding accrued on positions still open at the end of the run —
+    /// realised cash not attributed to any `TradeOutcome`.
+    open_funding: f64,
 }
 
 impl State {
@@ -478,6 +571,10 @@ impl State {
             period_returns: Vec::new(),
             last_marks: BTreeMap::new(),
             brackets: BTreeMap::new(),
+            accrued_funding: BTreeMap::new(),
+            funding_received: 0.0,
+            funding_paid: 0.0,
+            equity_times: Vec::new(),
         }
     }
 
@@ -567,12 +664,50 @@ impl State {
         })
     }
 
+    /// Book one funding settlement against a symbol's open position: the
+    /// position pays `sign(qty) × rate × notional` (so a positive rate
+    /// debits a long and credits a short), with notional valued at the
+    /// last-known mark — the price as of the candle *before* the
+    /// settlement, the backtest counterpart of the live ledger's
+    /// entry-notional approximation. No-op on flat positions and on
+    /// symbols with no mark yet (a position can't predate its first
+    /// candle). The cashflow lands in `cash` immediately and accrues
+    /// against the position for later trade attribution.
+    fn apply_funding(&mut self, sym: &Symbol, rate: f64, contract_value: f64) {
+        let Some(pos) = self.positions.get(sym) else {
+            return;
+        };
+        if pos.qty == 0.0 {
+            return;
+        }
+        let Some(&mark) = self.last_marks.get(sym) else {
+            return;
+        };
+        let notional = pos.qty.abs() * contract_value * mark;
+        let cashflow = -pos.qty.signum() * rate * notional;
+        self.cash += cashflow;
+        *self.accrued_funding.entry(sym.clone()).or_insert(0.0) += cashflow;
+        if cashflow >= 0.0 {
+            self.funding_received += cashflow;
+        } else {
+            self.funding_paid -= cashflow;
+        }
+    }
+
     /// Record the latest close for a symbol, then sample portfolio
     /// equity. The equity curve always grows by one sample per candle —
     /// even on `Hold` ticks — so Sharpe/Sortino see the full price path.
-    fn sample_step(&mut self, sym: &Symbol, close: f64, contract_value: f64) {
+    fn sample_step(&mut self, sym: &Symbol, close: f64, contract_value: f64, time: i64) {
         self.last_marks.insert(sym.clone(), close);
         let equity = self.equity_now(contract_value);
+
+        // Timestamp bookkeeping: the seed sample (initial cash, pushed in
+        // `State::new` before any candle is known) borrows the first
+        // candle's timestamp.
+        if self.equity_times.is_empty() {
+            self.equity_times.push(time);
+        }
+        self.equity_times.push(time);
 
         // Drawdown bookkeeping.
         if equity > self.equity_hwm {
@@ -612,10 +747,16 @@ impl State {
     }
 
     fn into_returns(self) -> ReturnsSummary {
+        // `BTreeMap` iteration order keeps this sum deterministic.
+        let open_funding: f64 = self.accrued_funding.values().sum();
         ReturnsSummary {
             max_drawdown: self.max_drawdown,
             equity: self.equity_curve,
+            equity_times: self.equity_times,
             period_returns: self.period_returns,
+            funding_received: self.funding_received,
+            funding_paid: self.funding_paid,
+            open_funding,
         }
     }
 }
@@ -844,6 +985,23 @@ fn apply_fill(
         } else {
             0.0
         };
+        // Attribute the position's accrued funding to this close,
+        // pro-rata by closed quantity. The cash itself was booked at
+        // each settlement — this only moves the attribution onto the
+        // trade ledger. A full close (or flip) takes the whole accrual,
+        // so no float-division dust is left behind.
+        let accrued = state.accrued_funding.get(symbol).copied().unwrap_or(0.0);
+        let closes_all = closing_qty >= old_qty.abs();
+        let funding_share = if closes_all {
+            accrued
+        } else {
+            accrued * (closing_qty / old_qty.abs())
+        };
+        if closes_all {
+            state.accrued_funding.remove(symbol);
+        } else if let Some(a) = state.accrued_funding.get_mut(symbol) {
+            *a -= funding_share;
+        }
         trades.push(TradeOutcome {
             symbol: symbol.as_str().to_string(),
             close_side: side,
@@ -852,6 +1010,7 @@ fn apply_fill(
             exit_price: fill_price,
             gross_pnl: gross,
             fee: fee_share,
+            funding: funding_share,
             closed_at: when,
         });
         state.cash += gross - fee_share;
