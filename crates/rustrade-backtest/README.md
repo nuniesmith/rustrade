@@ -13,9 +13,10 @@ duplicate decision logic to keep in sync.
 | `BacktestConfig` | Symbols, sizing config, slippage / fee models, initial cash, Sharpe annualisation      |
 | `SlippageModel`  | `Zero`, `FixedBps`. Applied between the brain's signal and the simulated fill price    |
 | `FeeModel`       | `Zero`, `Flat`, `MakerTaker`. Applied to every simulated fill                          |
+| `FundingModel`   | `None` (default), `Constant { rate, interval_ms }`, `Series`. Perp funding cashflows against open positions at settlement timestamps |
 | `load_csv` / `load_csv_str` | CSV → `Vec<Candle>` with a fixed `time,open,high,low,close,volume` layout   |
 | `sort_chronological` | Stable ascending-time sort for loaders that hand you newest-first              |
-| `BacktestResult` | Final stats: return %, win rate, max drawdown, equity curve, Sharpe, Sortino, # trades |
+| `BacktestResult` | Final stats: return %, win rate, expectancy, avg win/loss, max drawdown, timestamped equity curve, Sharpe, Sortino, funding totals, # trades |
 
 ## Quickstart
 
@@ -62,6 +63,25 @@ let result = Backtest::new(
 .with_symbol_candles("ETHUSDT", load_csv("data/eth.csv")?)
 .run()
 .await?;
+```
+
+### Perp funding
+
+For perpetual-futures strategies — funding-capture edges above all —
+attach a `FundingModel` so settlements hit the ledger the way they hit
+the exchange account. Positive rate → longs pay, shorts receive;
+settlements accrue onto each closed trade's `TradeOutcome::funding` and
+total up in `BacktestResult::{funding_received, funding_paid}`. Off by
+default: results without a model are bit-identical to previous releases.
+
+```rust,ignore
+use rustrade_backtest::{FundingModel, EIGHT_HOURS_MS};
+
+// Historical series when you have one…
+.funding(FundingModel::Series(settled_rates)) // Vec<(timestamp_ms, rate)>
+// …or a constant rate + interval fallback (1 bp every 8 h, the
+// KuCoin/Binance grid).
+.funding(FundingModel::Constant { rate: 0.0001, interval_ms: EIGHT_HOURS_MS })
 ```
 
 ## Brain parity

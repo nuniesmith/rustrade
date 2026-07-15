@@ -9,6 +9,67 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-14
+
+### Added — perp funding model in the backtest engine
+
+- **`BacktestConfig::funding`** (builder: `.funding(FundingModel::…)`) —
+  books perp funding cashflows against open positions at settlement
+  timestamps. `FundingModel::Series` takes a historical
+  `(timestamp_ms, rate)` series; `FundingModel::Constant { rate,
+  interval_ms }` is the fallback when no series exists (the exported
+  `EIGHT_HOURS_MS` reproduces the KuCoin/Binance 8 h UTC grid). Sign
+  conventions match the exchanges and the live paper ledger: positive
+  rate → longs pay, shorts receive; `cashflow = −sign(qty) × rate ×
+  notional` at the last-known mark. Settlement windows are
+  entry-exclusive / exit-inclusive (`(entry, exit]`), the same accrual
+  the live paper bot books into `net_pnl_usdt` over holds. Defaults to
+  `FundingModel::None` — with funding off, results are **bit-identical**
+  to previous releases (regression-tested).
+- **`TradeOutcome::funding`** — the accrued funding attributed to each
+  closed quantity (pro-rata on partial closes); `net_pnl()` is now
+  `gross − fee + funding`. `#[serde(default)]`, so previously serialized
+  results still deserialize.
+- **`BacktestResult::{funding_received, funding_paid}`** + a
+  `net_funding()` helper — run-level funding totals (both `0.0` with the
+  model off), also shown in `summary()`.
+
+### Added — richer `BacktestResult`
+
+- **`expectancy()` / `avg_win()` / `avg_loss()`** — mean net PnL per
+  trade (all trades), per winning trade, and per losing trade
+  (`avg_loss` keeps its negative sign so
+  `N·expectancy = W·avg_win + L·avg_loss` holds). All three surface in
+  `summary()`.
+- **Timestamped equity-curve export** — `BacktestResult::equity_times`
+  records the candle timestamp of every `equity_curve` sample (the seed
+  sample borrows the first candle's timestamp) and
+  `equity_points()` zips them into `Vec<EquityPoint { time, equity }>`
+  for plotting/persisting. `#[serde(default)]` — results serialized by
+  older versions deserialize with an empty `equity_times` and an empty
+  export.
+
+Like 0.4.0's additions, the new public struct fields
+(`BacktestConfig.funding`, `BacktestResult.{funding_received,
+funding_paid, equity_times}`, `TradeOutcome.funding`) are breaking for
+struct-literal construction only — hence the 0.4 → 0.5 bump (0.4.1 is
+published on crates.io, so shipping these under 0.4.x would break
+downstream struct-literal consumers inside a cargo-compatible range);
+the builder APIs and serde round-trips stay backward-compatible.
+
+### Changed — funding schedule re-validated at run time
+
+- **`Backtest::run` re-validates `BacktestConfig.funding`.**
+  `BacktestConfig`'s fields are public, so a `FundingModel::Series`
+  assigned *after* `build()` (or a config built via struct literal)
+  used to bypass the builder's validation and reach the engine
+  unsorted — `settlements_between`'s binary search then silently
+  dropped or double-booked settlements. `run()` now applies the same
+  normalisation the builder does: an unsorted series is sorted, and
+  NaN rates / duplicate settlement timestamps fail loud with
+  `Error::Config` instead of producing plausible-but-wrong funding
+  PnL. Configs from the builder are unaffected.
+
 ## [0.4.0] - 2026-06-14
 
 Live-safety and execution-correctness release. The 0.3 → 0.4 work hardens the
@@ -635,7 +696,8 @@ Pre-release skeleton. See [`TODO.md`](./TODO.md) for the 0.1.0 ship criteria.
 - `rustrade-backtest` — directory reserved; not yet populated.
 - `rustrade` (facade) — directory reserved; not yet populated.
 
-[Unreleased]: https://github.com/nuniesmith/rustrade/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/nuniesmith/rustrade/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/nuniesmith/rustrade/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nuniesmith/rustrade/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/nuniesmith/rustrade/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/nuniesmith/rustrade/compare/v0.2.0...v0.2.1

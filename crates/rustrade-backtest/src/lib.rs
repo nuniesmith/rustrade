@@ -29,6 +29,18 @@
 //! decisions are counted in [`BacktestResult::orders_blocked`]. Both
 //! gates default to off.
 //!
+//! # Perp funding
+//!
+//! [`BacktestConfig::funding`] (builder: `.funding(FundingModel::…)`)
+//! books perp funding cashflows against open positions at settlement
+//! timestamps — a historical [`FundingModel::Series`] or a constant
+//! rate + interval fallback. Positive rate → longs pay, shorts receive;
+//! cashflows land in the equity curve, accrue onto each closed trade's
+//! [`TradeOutcome::funding`], and total up in
+//! [`BacktestResult::funding_received`] / [`BacktestResult::funding_paid`].
+//! Defaults to [`FundingModel::None`] — existing backtests are
+//! bit-for-bit unchanged.
+//!
 //! # Status
 //!
 //! Phase 4b — adds CSV candle loader, Sharpe/Sortino metrics, and
@@ -39,6 +51,7 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub mod fees;
+pub mod funding;
 pub mod loaders;
 pub mod metrics;
 pub mod result;
@@ -48,7 +61,8 @@ pub use config::{BacktestConfig, BacktestConfigBuilder};
 pub use engine::Backtest;
 pub use error::{Error, Result};
 pub use fees::FeeModel;
+pub use funding::{EIGHT_HOURS_MS, FundingModel};
 pub use loaders::{load_csv, load_csv_str, sort_chronological};
 pub use metrics::TradeOutcome;
-pub use result::BacktestResult;
+pub use result::{BacktestResult, EquityPoint};
 pub use slippage::SlippageModel;

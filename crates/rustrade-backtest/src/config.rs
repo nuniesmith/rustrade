@@ -5,6 +5,7 @@ use rustrade_risk::{CircuitBreakerConfig, SessionPnlConfig, SizingConfig};
 
 use crate::error::{Error, Result};
 use crate::fees::FeeModel;
+use crate::funding::FundingModel;
 use crate::slippage::SlippageModel;
 
 /// Configuration for a [`crate::Backtest`].
@@ -43,6 +44,13 @@ pub struct BacktestConfig {
     pub slippage: SlippageModel,
     /// Fee schedule applied to every fill.
     pub fees: FeeModel,
+    /// Perp funding-rate schedule applied to open positions at funding
+    /// settlement timestamps (see [`FundingModel`] for the sign
+    /// conventions and window semantics). Multi-symbol backtests share a
+    /// single schedule — for per-symbol funding run each symbol in its
+    /// own `Backtest`, like [`Self::contract_value`]. Defaults to
+    /// [`FundingModel::None`] — existing backtests are unchanged.
+    pub funding: FundingModel,
     /// Base-asset units per contract. For spot adapters this is `1.0`;
     /// futures adapters override per symbol. Multi-symbol backtests
     /// share a single multiplier — for mixed spot/futures portfolios
@@ -107,6 +115,7 @@ pub struct BacktestConfigBuilder {
     sizing: Option<SizingConfig>,
     slippage: Option<SlippageModel>,
     fees: Option<FeeModel>,
+    funding: Option<FundingModel>,
     contract_value: Option<f64>,
     risk_free_rate: Option<f64>,
     periods_per_year: Option<u32>,
@@ -151,6 +160,13 @@ impl BacktestConfigBuilder {
     /// Override the fee model (default `Flat(0.0005)`).
     pub fn fees(mut self, m: FeeModel) -> Self {
         self.fees = Some(m);
+        self
+    }
+    /// Enable perp funding cashflows (default [`FundingModel::None`] —
+    /// off). Pass a historical [`FundingModel::Series`] when one exists,
+    /// or a [`FundingModel::Constant`] rate + interval as the fallback.
+    pub fn funding(mut self, m: FundingModel) -> Self {
+        self.funding = Some(m);
         self
     }
     /// Override the contract multiplier (default 1.0 — spot).
@@ -227,12 +243,21 @@ impl BacktestConfigBuilder {
                 "BacktestConfig.session_pnl.loss_limit must not be NaN".into(),
             ));
         }
+        // Validate + normalise the funding schedule (sorts a Series,
+        // rejects NaN rates / non-positive intervals / duplicate
+        // settlement timestamps).
+        let funding = self
+            .funding
+            .unwrap_or_default()
+            .validated()
+            .map_err(|why| Error::Config(format!("BacktestConfig.funding: {why}")))?;
         Ok(BacktestConfig {
             symbols: self.symbols,
             initial_cash,
             sizing: self.sizing.unwrap_or_default(),
             slippage: self.slippage.unwrap_or_default(),
             fees: self.fees.unwrap_or_default(),
+            funding,
             contract_value,
             risk_free_rate,
             periods_per_year,
@@ -296,8 +321,41 @@ mod tests {
         assert_eq!(c.initial_cash, 10_000.0);
         assert_eq!(c.contract_value, 1.0);
         assert_eq!(c.slippage, SlippageModel::Zero);
+        assert_eq!(c.funding, FundingModel::None);
         assert_eq!(c.risk_free_rate, 0.0);
         assert_eq!(c.periods_per_year, 252);
+    }
+
+    #[test]
+    fn rejects_invalid_funding_models() {
+        for bad in [
+            FundingModel::Constant {
+                rate: f64::NAN,
+                interval_ms: 1_000,
+            },
+            FundingModel::Constant {
+                rate: 0.0001,
+                interval_ms: 0,
+            },
+            FundingModel::Series(vec![(100, 0.1), (100, 0.2)]),
+            FundingModel::Series(vec![(100, f64::INFINITY)]),
+        ] {
+            let r = BacktestConfig::builder().symbol("X").funding(bad).build();
+            assert!(matches!(r, Err(Error::Config(_))));
+        }
+    }
+
+    #[test]
+    fn build_sorts_funding_series() {
+        let c = BacktestConfig::builder()
+            .symbol("X")
+            .funding(FundingModel::Series(vec![(300, 0.3), (100, 0.1)]))
+            .build()
+            .unwrap();
+        assert_eq!(
+            c.funding,
+            FundingModel::Series(vec![(100, 0.1), (300, 0.3)])
+        );
     }
 
     #[test]
