@@ -21,6 +21,20 @@
 //! trade gross − fee); it does flow into the circuit breaker's win/loss
 //! classification via `TradeOutcome::net_pnl`.
 //!
+//! # Fill models
+//!
+//! [`BacktestConfig::fill_model`](crate::BacktestConfig::fill_model)
+//! selects the fill semantics. The default
+//! ([`FillModel::TakerAtClose`]) keeps the historical behaviour:
+//! everything fills (or is dropped) on the decision candle, and
+//! protective brackets fill at their fixed level. Opting in to
+//! [`FillModel::Resting`] gives honest resting-order semantics —
+//! non-marketable limits rest across candles (fill on cross at the
+//! limit, at the open on a gap through), stops fill at the level or
+//! worse, standalone stop/TP protective orders work without the other
+//! leg, and same-candle ambiguity resolves pessimistically. The complete
+//! convention list lives on [`FillModel`].
+//!
 //! # Multi-symbol replay
 //!
 //! Each candle is tagged with a symbol. The engine maintains independent
@@ -40,7 +54,7 @@ use rustrade_core::{
 use rustrade_risk::clock::ManualClock;
 use rustrade_risk::{CircuitBreaker, PositionSizer, SessionPnl};
 
-use crate::config::BacktestConfig;
+use crate::config::{BacktestConfig, FillModel};
 use crate::error::{Error, Result};
 use crate::fees::FeeModel;
 use crate::metrics::TradeOutcome;
@@ -187,6 +201,10 @@ impl Backtest {
         let funding_on = self.config.funding.is_enabled();
         let mut last_seen: BTreeMap<Symbol, i64> = BTreeMap::new();
 
+        // Honest resting-order semantics (see `FillModel::Resting`) —
+        // off by default, so legacy runs take none of the paths below.
+        let resting_mode = self.config.fill_model == FillModel::Resting;
+
         for (symbol, candle) in &merged {
             // Advance replay time and roll the risk state over before any
             // decision on this candle — the live counterpart is the
@@ -226,6 +244,7 @@ impl Backtest {
                     self.config.fees,
                     self.config.slippage,
                     self.config.contract_value,
+                    self.config.fill_model,
                     candle_time(candle),
                     &mut trades,
                 ) {
@@ -237,6 +256,38 @@ impl Backtest {
                         .on_fill(&fill)
                         .await
                         .map_err(|e| Error::Brain(e.to_string()))?;
+                }
+            }
+
+            // ── Resting entry orders fill second (FillModel::Resting) ───────
+            // A limit placed on an earlier candle fills when this candle's
+            // range reaches its level — at the limit price, or at this
+            // candle's open when it gaps through. Protective exits are
+            // evaluated first (above): reducing the old position before
+            // opening a new one is the pessimistic ordering when both are
+            // touchable in the same candle.
+            if resting_mode {
+                let before = trades.len();
+                let fills = state.check_resting_entry(
+                    symbol,
+                    candle,
+                    self.config.fees,
+                    self.config.slippage,
+                    self.config.contract_value,
+                    candle_time(candle),
+                    &mut trades,
+                );
+                if !fills.is_empty() {
+                    if let Some(r) = risk.get_mut(symbol) {
+                        record_closes_into_risk(r, &trades[before..]);
+                    }
+                    for fill in &fills {
+                        orders_filled += 1;
+                        self.brain
+                            .on_fill(fill)
+                            .await
+                            .map_err(|e| Error::Brain(e.to_string()))?;
+                    }
                 }
             }
 
@@ -292,6 +343,16 @@ impl Backtest {
                 continue;
             }
 
+            // Resting mode: any gate-passing non-`Hold` decision cancels
+            // the symbol's working entry order first (cancel-and-replace;
+            // the replacement may be nothing — e.g. a `Close` on a flat
+            // position just pulls the resting order). Gated-off decisions
+            // above leave it resting, consistent with "the gates block
+            // every non-Hold decision".
+            if resting_mode {
+                state.cancel_resting(symbol);
+            }
+
             // Translate the decision into a concrete fill request. For
             // `Close` we use the existing position size. For Buy/Sell we
             // size from the brain's hint just like ExecutionService, and
@@ -321,21 +382,52 @@ impl Backtest {
                 continue;
             }
 
-            // Decide the fill by order kind. Market / IOC / FOK and closes
-            // are immediate takers at the candle close. Limit / PostOnly
-            // rest and fill only if this candle's range crosses the limit
-            // (a post-only that would cross as taker is rejected). A limit
-            // that doesn't cross is treated as unfilled and dropped — orders
-            // that rest across candles or partially fill need an order book
-            // (a 0.4a item).
-            let Some((reference_price, is_taker)) = resolve_fill(&resolved, candle) else {
-                state.sample_step(
-                    symbol,
-                    candle.close,
-                    self.config.contract_value,
-                    candle.time,
-                );
-                continue;
+            // Decide the fill by order kind and fill model. Legacy
+            // (`TakerAtClose`): market / IOC / FOK and closes are immediate
+            // takers at the candle close; limit / post-only fill only if the
+            // decision candle's range crosses the limit (a post-only that
+            // would cross as taker is rejected) and are dropped otherwise —
+            // nothing rests across candles. `Resting`: non-marketable limits
+            // rest on the synthetic book and fill on later candles (see the
+            // resting-entry block above); partial fills still need an order
+            // book and remain out of scope.
+            let disposition = match self.config.fill_model {
+                FillModel::TakerAtClose => match resolve_fill(&resolved, candle) {
+                    Some((price, is_taker)) => EntryDisposition::Immediate { price, is_taker },
+                    None => EntryDisposition::Drop,
+                },
+                FillModel::Resting => resolve_entry_resting(&resolved, candle),
+            };
+            let (reference_price, is_taker) = match disposition {
+                EntryDisposition::Immediate { price, is_taker } => (price, is_taker),
+                EntryDisposition::Rest { limit } => {
+                    state.set_resting(
+                        symbol,
+                        RestingEntry {
+                            side: resolved.side,
+                            qty: resolved.qty,
+                            limit,
+                            stop: decision.stop_price.map(|p| p.value()),
+                            take_profit: decision.take_profit_price.map(|p| p.value()),
+                        },
+                    );
+                    state.sample_step(
+                        symbol,
+                        candle.close,
+                        self.config.contract_value,
+                        candle.time,
+                    );
+                    continue;
+                }
+                EntryDisposition::Drop => {
+                    state.sample_step(
+                        symbol,
+                        candle.close,
+                        self.config.contract_value,
+                        candle.time,
+                    );
+                    continue;
+                }
             };
             // Slippage applies to taker fills (crossing the spread); a
             // resting maker fills at its limit price exactly.
@@ -391,22 +483,31 @@ impl Backtest {
                 .await
                 .map_err(|e| Error::Brain(e.to_string()))?;
 
-            // Record a simulated OCO bracket for a freshly opened bracketed
-            // market entry (mirrors the live ExecutionService::place_brackets).
-            // It is fired intra-candle on later candles; cleared when flat.
-            if !resolved.is_close
-                && let (Some(sl), Some(tp)) = (decision.stop_price, decision.take_profit_price)
-            {
-                let pos = state.position(symbol).copied().unwrap_or(Position::FLAT);
-                if pos.qty != 0.0 {
-                    state.set_bracket(
-                        symbol,
-                        Bracket {
-                            stop: sl.value(),
-                            take_profit: tp.value(),
-                            long: pos.qty > 0.0,
-                        },
-                    );
+            // Record a simulated protective bracket for a freshly opened
+            // entry (mirrors the live ExecutionService::place_brackets).
+            // Legacy mode requires BOTH legs (a full OCO); resting mode
+            // also honours standalone stop-only / TP-only protections. It
+            // is fired intra-candle on later candles; cleared when flat.
+            if !resolved.is_close {
+                let sl = decision.stop_price.map(|p| p.value());
+                let tp = decision.take_profit_price.map(|p| p.value());
+                let register = if resting_mode {
+                    sl.is_some() || tp.is_some()
+                } else {
+                    sl.is_some() && tp.is_some()
+                };
+                if register {
+                    let pos = state.position(symbol).copied().unwrap_or(Position::FLAT);
+                    if pos.qty != 0.0 {
+                        state.set_bracket(
+                            symbol,
+                            Bracket {
+                                stop: sl,
+                                take_profit: tp,
+                                long: pos.qty > 0.0,
+                            },
+                        );
+                    }
                 }
             }
 
@@ -529,6 +630,13 @@ struct State {
     // `ExecutionService::place_brackets`: recorded when a bracketed market
     // entry fills, fired intra-candle, cleared when the position goes flat.
     brackets: BTreeMap<Symbol, Bracket>,
+    // Resting entry orders (`FillModel::Resting` only) — at most one per
+    // symbol, GTC. Placed when a non-marketable limit / post-only entry
+    // reaches the synthetic book at a decision candle's close; filled by a
+    // later candle crossing the level; cancelled (replaced) by the next
+    // gate-passing non-`Hold` decision. `BTreeMap` for the same
+    // determinism reason as `positions`.
+    resting: BTreeMap<Symbol, RestingEntry>,
     // Funding cashflow accrued against each *open* position (already in
     // `cash`; tracked here so closes can attribute it to their
     // `TradeOutcome`s). Cleared when the position goes flat or flips.
@@ -571,6 +679,7 @@ impl State {
             period_returns: Vec::new(),
             last_marks: BTreeMap::new(),
             brackets: BTreeMap::new(),
+            resting: BTreeMap::new(),
             accrued_funding: BTreeMap::new(),
             funding_received: 0.0,
             funding_paid: 0.0,
@@ -595,12 +704,31 @@ impl State {
         self.brackets.insert(sym.clone(), bracket);
     }
 
+    /// Place a resting entry order (`FillModel::Resting` only). At most
+    /// one per symbol — a new placement replaces the previous one.
+    fn set_resting(&mut self, sym: &Symbol, entry: RestingEntry) {
+        self.resting.insert(sym.clone(), entry);
+    }
+
+    /// Cancel the symbol's resting entry order, if any.
+    fn cancel_resting(&mut self, sym: &Symbol) {
+        self.resting.remove(sym);
+    }
+
     /// Fire a resting protective bracket leg if this candle's range crosses
-    /// it, closing the whole position at the trigger price and emitting the
-    /// `TradeOutcome`. Pessimistic: when a single bar spans BOTH legs the
-    /// **stop** fills first. Stop-market reduce-only legs cross the spread, so
-    /// the fill is a taker and takes slippage; it fills at the trigger level
-    /// (the repo's fixed-level convention — gaps beyond it are not modelled).
+    /// it, closing the whole position and emitting the `TradeOutcome`.
+    /// Pessimistic: when a single bar spans BOTH legs the **stop** fills
+    /// first. Fill-price conventions by mode:
+    ///
+    /// - [`FillModel::TakerAtClose`] (legacy): both legs fill at their
+    ///   fixed trigger level as takers with slippage — gaps beyond the
+    ///   level are not modelled.
+    /// - [`FillModel::Resting`]: the stop-market leg crosses the spread —
+    ///   taker with slippage, at the level *or worse* (a candle gapping
+    ///   through fills at its open). The take-profit leg is a resting
+    ///   limit — maker, no slippage, at the level or at the open when the
+    ///   candle gaps through it (price improvement).
+    ///
     /// Returns the synthetic [`Fill`] for the brain callback, or `None` if
     /// nothing fired. Self-heals a stale bracket (flat or flipped position).
     #[allow(clippy::too_many_arguments)]
@@ -611,6 +739,7 @@ impl State {
         fees: FeeModel,
         slippage: SlippageModel,
         contract_value: f64,
+        fill_model: FillModel,
         when: DateTime<Utc>,
         trades: &mut Vec<TradeOutcome>,
     ) -> Option<Fill> {
@@ -621,24 +750,47 @@ impl State {
             self.brackets.remove(sym);
             return None;
         }
-        let (trigger, close_side) = if bracket.long {
-            if candle.low <= bracket.stop {
-                (bracket.stop, Side::Sell)
-            } else if candle.high >= bracket.take_profit {
-                (bracket.take_profit, Side::Sell)
+        let long = bracket.long;
+        let close_side = if long { Side::Sell } else { Side::Buy };
+        // Leg selection, stop first (pessimistic in both modes). For a
+        // long the stop sits below the market and the TP above; mirrored
+        // for a short. `crossed` is the honest gap-aware fill price;
+        // legacy mode overrides it with the fixed level below.
+        let stop_hit = bracket.stop.and_then(|level| {
+            let crossed = if long {
+                cross_down(level, candle)
             } else {
-                return None;
+                cross_up(level, candle)
+            };
+            crossed.map(|px| (level, px, true))
+        });
+        let (level, crossed, is_stop) = stop_hit.or_else(|| {
+            bracket.take_profit.and_then(|level| {
+                let crossed = if long {
+                    cross_up(level, candle)
+                } else {
+                    cross_down(level, candle)
+                };
+                crossed.map(|px| (level, px, false))
+            })
+        })?;
+        let (fill_price, is_taker) = match fill_model {
+            // Legacy: fixed-level fill, taker + slippage on both legs.
+            FillModel::TakerAtClose => (slippage.apply(close_side, level), true),
+            FillModel::Resting => {
+                if is_stop {
+                    // Stop-market: crosses the spread at the trigger (or
+                    // at the open on a gap through) — taker + slippage.
+                    (slippage.apply(close_side, crossed), true)
+                } else {
+                    // Take-profit: a resting limit — maker, no slippage,
+                    // gap through → fill at the open (price improvement).
+                    (crossed, false)
+                }
             }
-        } else if candle.high >= bracket.stop {
-            (bracket.stop, Side::Buy)
-        } else if candle.low <= bracket.take_profit {
-            (bracket.take_profit, Side::Buy)
-        } else {
-            return None;
         };
-        let fill_price = slippage.apply(close_side, trigger);
         let qty = pos.qty.abs();
-        let fee = fees.fee_for(fill_price, qty * contract_value, true);
+        let fee = fees.fee_for(fill_price, qty * contract_value, is_taker);
         apply_fill(
             self,
             sym,
@@ -662,6 +814,135 @@ impl State {
             fee_currency: "QUOTE".into(),
             timestamp: when,
         })
+    }
+
+    /// Fill the symbol's resting entry order if this candle's range
+    /// reaches its level (`FillModel::Resting` only). The fill is a maker
+    /// — the order rested on the book — so it takes the maker fee rate
+    /// and no slippage, at the limit price on a cross or at this candle's
+    /// open when it gaps through the level.
+    ///
+    /// If the fill leaves a position open and the original decision
+    /// carried protective levels, the bracket is attached — and resolved
+    /// **conservatively** for this candle: the entry and its stop can
+    /// both lie inside the candle's range with the OHLC path unknown, so
+    /// the stop is assumed to have been hit *after* the entry filled
+    /// (immediate stop-out, the worse outcome). The take-profit gets no
+    /// such benefit of the doubt — its level may have printed *before*
+    /// the entry existed — so it only becomes eligible from the next
+    /// candle.
+    ///
+    /// Returns the emitted fills in order (entry, then a possible
+    /// same-candle stop-out); empty when nothing fired.
+    #[allow(clippy::too_many_arguments)]
+    fn check_resting_entry(
+        &mut self,
+        sym: &Symbol,
+        candle: &Candle,
+        fees: FeeModel,
+        slippage: SlippageModel,
+        contract_value: f64,
+        when: DateTime<Utc>,
+        trades: &mut Vec<TradeOutcome>,
+    ) -> Vec<Fill> {
+        let Some(entry) = self.resting.get(sym).copied() else {
+            return Vec::new();
+        };
+        let crossed = match entry.side {
+            Side::Buy => cross_down(entry.limit, candle),
+            Side::Sell => cross_up(entry.limit, candle),
+        };
+        let Some(entry_price) = crossed else {
+            return Vec::new();
+        };
+        self.resting.remove(sym);
+
+        let entry_fee = fees.fee_for(entry_price, entry.qty * contract_value, false);
+        apply_fill(
+            self,
+            sym,
+            entry.side,
+            entry.qty,
+            entry_price,
+            entry_fee,
+            contract_value,
+            when,
+            trades,
+        );
+        let mut fills = vec![Fill {
+            symbol: sym.clone(),
+            order_id: "bt-resting".to_string(),
+            client_id: None,
+            side: entry.side,
+            price: rustrade_core::Price(entry_price),
+            size: rustrade_core::Volume(entry.qty),
+            fee: entry_fee,
+            fee_currency: "QUOTE".into(),
+            timestamp: when,
+        }];
+
+        // Attach the decision's protective bracket to whatever position
+        // the fill leaves open (mirrors the immediate-fill path; partial
+        // stop-only / TP-only brackets are honoured in resting mode).
+        if entry.stop.is_none() && entry.take_profit.is_none() {
+            return fills;
+        }
+        let pos = self.positions.get(sym).copied().unwrap_or(Position::FLAT);
+        if pos.qty == 0.0 {
+            return fills;
+        }
+        let long = pos.qty > 0.0;
+        self.set_bracket(
+            sym,
+            Bracket {
+                stop: entry.stop,
+                take_profit: entry.take_profit,
+                long,
+            },
+        );
+
+        // Conservative same-candle stop check (see the method docs): the
+        // freshly attached stop may fire on the very candle that filled
+        // the entry; the TP may not.
+        let Some(stop) = entry.stop else {
+            return fills;
+        };
+        let stop_crossed = if long {
+            cross_down(stop, candle)
+        } else {
+            cross_up(stop, candle)
+        };
+        let Some(stop_px) = stop_crossed else {
+            return fills;
+        };
+        let close_side = if long { Side::Sell } else { Side::Buy };
+        let fill_price = slippage.apply(close_side, stop_px);
+        let qty = pos.qty.abs();
+        let stop_fee = fees.fee_for(fill_price, qty * contract_value, true);
+        apply_fill(
+            self,
+            sym,
+            close_side,
+            qty,
+            fill_price,
+            stop_fee,
+            contract_value,
+            when,
+            trades,
+        );
+        self.brackets.remove(sym);
+        fills.push(Fill {
+            symbol: sym.clone(),
+            order_id: "bt-bracket".to_string(),
+            client_id: None,
+            side: close_side,
+            price: rustrade_core::Price(fill_price),
+            size: rustrade_core::Volume(qty),
+            fee: stop_fee,
+            fee_currency: "QUOTE".into(),
+            timestamp: when,
+        });
+        fills
     }
 
     /// Book one funding settlement against a symbol's open position: the
@@ -796,19 +1077,67 @@ struct ResolvedOrder {
     limit_price: Option<f64>,
 }
 
-/// A simulated reduce-only OCO bracket attached to an open position — the
+/// A simulated reduce-only bracket attached to an open position — the
 /// backtest counterpart of the live `ExecutionService::place_brackets` SL
 /// (stop-market) + TP legs. Whichever leg the candle range crosses first
-/// closes the whole position (one-cancels-the-other).
+/// closes the whole position (one-cancels-the-other). Legacy mode always
+/// records both legs; [`FillModel::Resting`] also honours standalone
+/// stop-only / TP-only protections.
 #[derive(Clone, Copy)]
 struct Bracket {
-    /// Stop-loss trigger price.
-    stop: f64,
-    /// Take-profit trigger price.
-    take_profit: f64,
+    /// Stop-loss trigger price, if a stop leg exists.
+    stop: Option<f64>,
+    /// Take-profit trigger price, if a TP leg exists.
+    take_profit: Option<f64>,
     /// `true` when protecting a long (stop below entry, TP above); `false`
     /// for a short (stop above, TP below).
     long: bool,
+}
+
+/// A resting entry order on the synthetic book (`FillModel::Resting`
+/// only): a non-marketable limit / post-only entry waiting for a later
+/// candle to cross its level. Quantity is fixed at placement (sized at
+/// the decision candle's close, like the immediate path). Carries the
+/// decision's protective levels so the bracket attaches when the entry
+/// eventually fills.
+#[derive(Clone, Copy)]
+struct RestingEntry {
+    /// Direction of the entry.
+    side: Side,
+    /// Contracts to fill (whole-order fills only — no book depth).
+    qty: f64,
+    /// Resting limit level in quote currency.
+    limit: f64,
+    /// Stop-loss level to attach on fill, if the decision carried one.
+    stop: Option<f64>,
+    /// Take-profit level to attach on fill, if the decision carried one.
+    take_profit: Option<f64>,
+}
+
+// ── Honest level-cross fills ────────────────────────────────────────────
+//
+// The two primitives behind every resting fill. A level *below* the
+// market path is a buy limit or a sell stop; a level *above* is a sell
+// limit or a buy stop. Both fire on the same trigger their live
+// counterparts use; the honest fill price is the level itself when the
+// candle trades through it, or the candle's **open** when the candle
+// already opens at/through the level (a gap — the level never traded, so
+// the open was the first price the market offered). This one formula
+// yields price *improvement* for gapped limit fills and *worse-than-level*
+// fills for gapped stops, exactly as a real book would.
+
+/// Fill price for a resting order at `level` when the market crosses
+/// **down** through it (buy limit below the market, or a long's sell
+/// stop). `None` when the candle's range never reaches the level.
+fn cross_down(level: f64, candle: &Candle) -> Option<f64> {
+    (candle.low <= level).then(|| candle.open.min(level))
+}
+
+/// Fill price for a resting order at `level` when the market crosses
+/// **up** through it (sell limit above the market, or a short's buy
+/// stop). `None` when the candle's range never reaches the level.
+fn cross_up(level: f64, candle: &Candle) -> Option<f64> {
+    (candle.high >= level).then(|| candle.open.max(level))
 }
 
 /// Feed each realised close into a symbol's risk gates — the session-PnL
@@ -873,10 +1202,80 @@ fn resolve_order(
     }
 }
 
+/// What happens to a resolved entry order on its decision candle.
+#[derive(Clone, Copy)]
+enum EntryDisposition {
+    /// Fill now at `price` (`is_taker` selects the fee rate and whether
+    /// slippage applies).
+    Immediate { price: f64, is_taker: bool },
+    /// Rest on the synthetic book at `limit` (`FillModel::Resting` only).
+    Rest { limit: f64 },
+    /// Dropped without a fill: a marketable post-only, a non-marketable
+    /// IOC/FOK (resting mode), or a limit the decision candle never
+    /// crossed (legacy mode).
+    Drop,
+}
+
+/// Resolve an entry order under [`FillModel::Resting`]. The order reaches
+/// the book at the decision candle's **close** — the market price at
+/// decision time — so marketability is judged against the close and the
+/// decision candle itself can never fill a resting order (its range
+/// printed before the order existed; no lookahead).
+///
+/// - Market orders and closes: taker at the close, same as legacy.
+/// - Limit: marketable (buy limit ≥ close / sell limit ≤ close) crosses
+///   immediately at the close as taker; otherwise rests at the limit.
+/// - PostOnly: rejected when marketable; otherwise rests (fills are
+///   always maker).
+/// - IOC / FOK: taker at the close when marketable, else cancelled. The
+///   engine has no book depth, so both fill in full or not at all and
+///   behave identically.
+/// - A missing limit price falls back to the close (mirroring the live
+///   execution layer's event-price fallback), which makes the order
+///   immediately marketable.
+fn resolve_entry_resting(resolved: &ResolvedOrder, candle: &Candle) -> EntryDisposition {
+    let taker_now = EntryDisposition::Immediate {
+        price: candle.close,
+        is_taker: true,
+    };
+    if resolved.is_close || matches!(resolved.kind, OrderKind::Market) {
+        return taker_now;
+    }
+    let limit = resolved.limit_price.unwrap_or(candle.close);
+    let marketable = match resolved.side {
+        Side::Buy => limit >= candle.close,
+        Side::Sell => limit <= candle.close,
+    };
+    match resolved.kind {
+        OrderKind::Ioc | OrderKind::Fok => {
+            if marketable {
+                taker_now
+            } else {
+                EntryDisposition::Drop
+            }
+        }
+        OrderKind::PostOnly => {
+            if marketable {
+                EntryDisposition::Drop
+            } else {
+                EntryDisposition::Rest { limit }
+            }
+        }
+        OrderKind::Limit | OrderKind::Market => {
+            if marketable {
+                taker_now
+            } else {
+                EntryDisposition::Rest { limit }
+            }
+        }
+    }
+}
+
 /// Decide whether and at what reference price a resolved order fills on
-/// `candle`. Returns `(reference_price, is_taker)`; the caller applies
-/// slippage to taker fills. Returns `None` when a resting limit doesn't
-/// cross this candle (or a post-only would cross as taker).
+/// `candle` — the legacy [`FillModel::TakerAtClose`] path. Returns
+/// `(reference_price, is_taker)`; the caller applies slippage to taker
+/// fills. Returns `None` when a resting limit doesn't cross this candle
+/// (or a post-only would cross as taker).
 ///
 /// - **Market / IOC / FOK and closes** fill immediately at the candle
 ///   close as takers.
@@ -1334,6 +1733,67 @@ mod tests {
         assert_eq!(result.trades.len(), 0);
         // Symbol label is the concatenated list.
         assert_eq!(result.symbol, "AAA,BBB");
+    }
+
+    // ── Honest level-cross helpers ──────────────────────────────────────
+
+    fn range_candle(open: f64, high: f64, low: f64, close: f64) -> Candle {
+        Candle {
+            time: 0,
+            open,
+            high,
+            low,
+            close,
+            volume: 1.0,
+        }
+    }
+
+    #[test]
+    fn cross_down_fills_at_level_on_intrabar_cross() {
+        // Opens above the level, trades down through it → the level traded.
+        let c = range_candle(100.0, 101.0, 94.0, 96.0);
+        assert_eq!(cross_down(95.0, &c), Some(95.0));
+    }
+
+    #[test]
+    fn cross_down_fills_at_open_on_gap_through() {
+        // Opens already below the level → the level never traded; the open
+        // was the first price the market offered.
+        let c = range_candle(90.0, 92.0, 89.0, 91.0);
+        assert_eq!(cross_down(95.0, &c), Some(90.0));
+    }
+
+    #[test]
+    fn cross_down_none_when_low_never_reaches_level() {
+        let c = range_candle(100.0, 101.0, 96.0, 97.0);
+        assert_eq!(cross_down(95.0, &c), None);
+    }
+
+    #[test]
+    fn cross_up_fills_at_level_on_intrabar_cross() {
+        let c = range_candle(100.0, 106.0, 99.0, 104.0);
+        assert_eq!(cross_up(105.0, &c), Some(105.0));
+    }
+
+    #[test]
+    fn cross_up_fills_at_open_on_gap_through() {
+        let c = range_candle(110.0, 112.0, 108.0, 111.0);
+        assert_eq!(cross_up(105.0, &c), Some(110.0));
+    }
+
+    #[test]
+    fn cross_up_none_when_high_never_reaches_level() {
+        let c = range_candle(100.0, 104.0, 99.0, 103.0);
+        assert_eq!(cross_up(105.0, &c), None);
+    }
+
+    #[test]
+    fn cross_fires_on_exact_touch() {
+        // Boundary: a low/high exactly ON the level counts as a cross and
+        // fills at the level (open is on the far side, so no gap).
+        let c = range_candle(100.0, 105.0, 95.0, 100.0);
+        assert_eq!(cross_down(95.0, &c), Some(95.0));
+        assert_eq!(cross_up(105.0, &c), Some(105.0));
     }
 
     // ── Candle validation ───────────────────────────────────────────────

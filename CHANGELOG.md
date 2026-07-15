@@ -47,8 +47,35 @@ workspace moves as one until any single crate needs to diverge.
   older versions deserialize with an empty `equity_times` and an empty
   export.
 
+### Added — honest resting limit/stop fills in the backtest engine
+
+- **`BacktestConfig::fill_model`** (builder:
+  `.fill_model(FillModel::…)`) — selects the fill semantics. The default,
+  **`FillModel::TakerAtClose`**, keeps the historical behaviour and is
+  **bit-identical** to previous releases (regression-pinned). Opting in
+  to **`FillModel::Resting`** gives honest resting-order semantics:
+  - orders reach the synthetic book at the decision candle's **close**,
+    so the decision candle can never fill a resting order (no lookahead);
+  - a non-marketable limit / post-only **rests** (GTC, at most one per
+    symbol; cancel-and-replace on the next gate-passing non-`Hold`
+    decision) and fills when a later candle crosses its level — at the
+    limit price, or at that candle's **open** when it gaps through
+    (never better than the market offered); resting fills are makers
+    (maker fee rate, no slippage);
+  - a protective **stop** triggers on a cross and fills at the level
+    *or worse* (gap → open) as a taker with slippage; a **take-profit**
+    is a resting limit (level, or open on a gap — price improvement;
+    maker, no slippage);
+  - **standalone** stop-only / TP-only protections are honoured (legacy
+    requires both OCO legs);
+  - **same-candle ambiguity** resolves pessimistically: the stop leg
+    fires before the TP leg, and on the candle a resting entry fills its
+    attached stop may fire immediately but its TP only becomes eligible
+    from the next candle;
+  - non-marketable IOC / FOK entries are cancelled, not rested.
+
 Like 0.4.0's additions, the new public struct fields
-(`BacktestConfig.funding`, `BacktestResult.{funding_received,
+(`BacktestConfig.{funding, fill_model}`, `BacktestResult.{funding_received,
 funding_paid, equity_times}`, `TradeOutcome.funding`) are breaking for
 struct-literal construction only; the builder APIs and serde round-trips
 stay backward-compatible.
