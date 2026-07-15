@@ -76,6 +76,22 @@ workspace moves as one until any single crate needs to diverge.
     from the next candle;
   - non-marketable IOC / FOK entries are cancelled, not rested.
 
+  Hardening of the resting model (`FillModel::Resting` only; legacy stays
+  bit-identical):
+  - a resting fill that **flattens or flips** a bracketed position now
+    clears that position's protective bracket, so its legs can never fire
+    against an unrelated position opened later on the same or a later
+    candle;
+  - a **marketable** limit / IOC / FOK taker fill is now **capped at its
+    own limit** under slippage — a buy fills at `min(limit, slipped)`, a
+    sell at `max(limit, slipped)` — so a configured slippage can no longer
+    print a fill through the limit a real venue would honour;
+  - protective legs whose orientation is **incoherent** for the surviving
+    position (a long's stop above the fill, or a short's below) are
+    dropped instead of registered, preventing an immediate phantom
+    stop-out when a reducing entry carries levels meant for a different
+    intended position.
+
 Like 0.4.0's additions, the new public struct fields
 (`BacktestConfig.{funding, fill_model}`, `BacktestResult.{funding_received,
 funding_paid, equity_times}`, `TradeOutcome.funding`) are breaking for

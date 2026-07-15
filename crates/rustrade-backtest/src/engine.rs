@@ -408,13 +408,23 @@ impl Backtest {
             // book and remain out of scope.
             let disposition = match self.config.fill_model {
                 FillModel::TakerAtClose => match resolve_fill(&resolved, candle) {
-                    Some((price, is_taker)) => EntryDisposition::Immediate { price, is_taker },
+                    // Legacy keeps its exact fill semantics (no limit cap):
+                    // this path is pinned bit-identical by regression tests.
+                    Some((price, is_taker)) => EntryDisposition::Immediate {
+                        price,
+                        is_taker,
+                        limit_cap: None,
+                    },
                     None => EntryDisposition::Drop,
                 },
                 FillModel::Resting => resolve_entry_resting(&resolved, candle),
             };
-            let (reference_price, is_taker) = match disposition {
-                EntryDisposition::Immediate { price, is_taker } => (price, is_taker),
+            let (reference_price, is_taker, limit_cap) = match disposition {
+                EntryDisposition::Immediate {
+                    price,
+                    is_taker,
+                    limit_cap,
+                } => (price, is_taker, limit_cap),
                 EntryDisposition::Rest { limit } => {
                     state.set_resting(
                         symbol,
@@ -445,9 +455,20 @@ impl Backtest {
                 }
             };
             // Slippage applies to taker fills (crossing the spread); a
-            // resting maker fills at its limit price exactly.
+            // resting maker fills at its limit price exactly. A marketable
+            // limit / IOC / FOK carries a `limit_cap`: slippage may move the
+            // fill toward the limit but never through it (buys cap at the
+            // limit as a ceiling, sells as a floor) — a real venue can't
+            // print a fill worse than the order's own limit.
             let fill_price = if is_taker {
-                self.config.slippage.apply(resolved.side, reference_price)
+                let slipped = self.config.slippage.apply(resolved.side, reference_price);
+                match limit_cap {
+                    Some(limit) => match resolved.side {
+                        Side::Buy => slipped.min(limit),
+                        Side::Sell => slipped.max(limit),
+                    },
+                    None => slipped,
+                }
             } else {
                 reference_price
             };
@@ -514,14 +535,21 @@ impl Backtest {
                 if register {
                     let pos = state.position(symbol).copied().unwrap_or(Position::FLAT);
                     if pos.qty != 0.0 {
-                        state.set_bracket(
-                            symbol,
-                            Bracket {
-                                stop: sl,
-                                take_profit: tp,
-                                long: pos.qty > 0.0,
-                            },
-                        );
+                        let long = pos.qty > 0.0;
+                        // Drop protective legs whose orientation is incoherent
+                        // for the surviving position (a reducing fill can carry
+                        // levels meant for a different intended position).
+                        let (stop, take_profit) = coherent_bracket_legs(long, fill_price, sl, tp);
+                        if stop.is_some() || take_profit.is_some() {
+                            state.set_bracket(
+                                symbol,
+                                Bracket {
+                                    stop,
+                                    take_profit,
+                                    long,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -896,22 +924,48 @@ impl State {
             timestamp: when,
         }];
 
+        // Post-fill position. This fill may have reduced, flattened, or
+        // flipped a position that still carries a protective bracket from
+        // its own (now-dead) entry. A bracket left over from a position
+        // this fill flattened or flipped is stale — a real venue would
+        // have cancelled its reduce-only legs the moment the book went
+        // flat or crossed to the other side — so drop it before attaching
+        // (or not) this entry's own protection. Without this, a dead
+        // position's legs fire against the brand-new position on a later
+        // candle (the exact phantom order state the honest model removes).
+        let pos = self.positions.get(sym).copied().unwrap_or(Position::FLAT);
+        if let Some(existing) = self.brackets.get(sym).copied() {
+            let flat = pos.qty == 0.0;
+            let flipped = existing.long != (pos.qty > 0.0);
+            if flat || flipped {
+                self.brackets.remove(sym);
+            }
+        }
+
         // Attach the decision's protective bracket to whatever position
         // the fill leaves open (mirrors the immediate-fill path; partial
         // stop-only / TP-only brackets are honoured in resting mode).
         if entry.stop.is_none() && entry.take_profit.is_none() {
             return fills;
         }
-        let pos = self.positions.get(sym).copied().unwrap_or(Position::FLAT);
         if pos.qty == 0.0 {
             return fills;
         }
         let long = pos.qty > 0.0;
+        // Drop protective legs whose orientation is incoherent for the
+        // surviving position (a reducing fill can carry levels meant for a
+        // different intended position); an incoherent leg would fire almost
+        // instantly against the survivor.
+        let (stop, take_profit) =
+            coherent_bracket_legs(long, entry_price, entry.stop, entry.take_profit);
+        if stop.is_none() && take_profit.is_none() {
+            return fills;
+        }
         self.set_bracket(
             sym,
             Bracket {
-                stop: entry.stop,
-                take_profit: entry.take_profit,
+                stop,
+                take_profit,
                 long,
             },
         );
@@ -919,7 +973,7 @@ impl State {
         // Conservative same-candle stop check (see the method docs): the
         // freshly attached stop may fire on the very candle that filled
         // the entry; the TP may not.
-        let Some(stop) = entry.stop else {
+        let Some(stop) = stop else {
             return fills;
         };
         let stop_crossed = if long {
@@ -1155,6 +1209,38 @@ fn cross_up(level: f64, candle: &Candle) -> Option<f64> {
     (candle.high >= level).then(|| candle.open.max(level))
 }
 
+/// Keep only the protective legs whose price sits on the correct side of
+/// the fill for the surviving position's direction: a long's stop must be
+/// below the entry and its take-profit above; a short is mirrored. A
+/// reducing or flipping fill can leave a bracket built from levels meant
+/// for a *different* intended position (e.g. a long that emits a partial
+/// `Sell` carrying a stop above the market for the short it wanted); an
+/// incoherent leg would fire almost immediately against the survivor. Such
+/// legs are dropped. Returns the coherent `(stop, take_profit)`; either or
+/// both may be `None`, in which case the caller registers no bracket.
+fn coherent_bracket_legs(
+    long: bool,
+    entry_price: f64,
+    stop: Option<f64>,
+    take_profit: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    let stop = stop.filter(|&s| {
+        if long {
+            s < entry_price
+        } else {
+            s > entry_price
+        }
+    });
+    let take_profit = take_profit.filter(|&t| {
+        if long {
+            t > entry_price
+        } else {
+            t < entry_price
+        }
+    });
+    (stop, take_profit)
+}
+
 /// Feed each realised close into a symbol's risk gates — the session-PnL
 /// halt and the consecutive-loss circuit breaker — exactly as the live
 /// `FillRoutingService` does. Shared by the manual-fill and bracket-fill
@@ -1221,8 +1307,16 @@ fn resolve_order(
 #[derive(Clone, Copy)]
 enum EntryDisposition {
     /// Fill now at `price` (`is_taker` selects the fee rate and whether
-    /// slippage applies).
-    Immediate { price: f64, is_taker: bool },
+    /// slippage applies). `limit_cap` bounds the post-slippage taker fill
+    /// at the order's own limit — `Some(limit)` for a marketable limit /
+    /// IOC / FOK (slippage can never print a fill through the limit a real
+    /// venue would honour), `None` for a market order (no protective
+    /// price, slippage applies uncapped).
+    Immediate {
+        price: f64,
+        is_taker: bool,
+        limit_cap: Option<f64>,
+    },
     /// Rest on the synthetic book at `limit` (`FillModel::Resting` only).
     Rest { limit: f64 },
     /// Dropped without a fill: a marketable post-only, a non-marketable
@@ -1249,22 +1343,33 @@ enum EntryDisposition {
 ///   execution layer's event-price fallback), which makes the order
 ///   immediately marketable.
 fn resolve_entry_resting(resolved: &ResolvedOrder, candle: &Candle) -> EntryDisposition {
-    let taker_now = EntryDisposition::Immediate {
-        price: candle.close,
-        is_taker: true,
-    };
+    // A market order (or a close) has no protective limit: it crosses at
+    // the close as a taker and slippage applies uncapped.
     if resolved.is_close || matches!(resolved.kind, OrderKind::Market) {
-        return taker_now;
+        return EntryDisposition::Immediate {
+            price: candle.close,
+            is_taker: true,
+            limit_cap: None,
+        };
     }
     let limit = resolved.limit_price.unwrap_or(candle.close);
     let marketable = match resolved.side {
         Side::Buy => limit >= candle.close,
         Side::Sell => limit <= candle.close,
     };
+    // A marketable limit / IOC / FOK crosses now at the close, but its own
+    // limit caps the taker fill — slippage can push the reference toward
+    // the limit yet never through it (a real venue fills at the limit or
+    // rests the remainder; it can't print worse than the limit).
+    let taker_capped = EntryDisposition::Immediate {
+        price: candle.close,
+        is_taker: true,
+        limit_cap: Some(limit),
+    };
     match resolved.kind {
         OrderKind::Ioc | OrderKind::Fok => {
             if marketable {
-                taker_now
+                taker_capped
             } else {
                 EntryDisposition::Drop
             }
@@ -1278,7 +1383,7 @@ fn resolve_entry_resting(resolved: &ResolvedOrder, candle: &Candle) -> EntryDisp
         }
         OrderKind::Limit | OrderKind::Market => {
             if marketable {
-                taker_now
+                taker_capped
             } else {
                 EntryDisposition::Rest { limit }
             }

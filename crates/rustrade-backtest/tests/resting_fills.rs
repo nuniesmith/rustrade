@@ -572,6 +572,270 @@ async fn resting_entry_fill_charges_the_maker_rate() {
     );
 }
 
+// ── Interaction cases: existing positions, brackets, slippage ───────────────
+
+/// A `FillModel::Resting` config with a caller-chosen slippage model.
+fn cfg_slip(slippage: SlippageModel) -> BacktestConfig {
+    BacktestConfig::builder()
+        .symbol("BTCUSDT")
+        .initial_cash(10_000.0)
+        .sizing(SizingConfig {
+            margin_per_trade: 1_000.0,
+            leverage: 1,
+            max_contracts: 1_000,
+        })
+        .fees(FeeModel::Zero)
+        .slippage(slippage)
+        .fill_model(FillModel::Resting)
+        .build()
+        .unwrap()
+}
+
+async fn run_cfg(
+    cfg: BacktestConfig,
+    script: Vec<Decision>,
+    candles: Vec<Candle>,
+) -> rustrade_backtest::BacktestResult {
+    Backtest::new(cfg, ScriptBrain::new(script))
+        .with_candles(candles)
+        .run()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn resting_flatten_clears_stale_bracket_no_phantom_exit() {
+    // Regression (HIGH): a resting fill that FLATTENS a bracketed position
+    // must clear that position's now-dead bracket, so its legs can never
+    // fire against a brand-new same-direction position opened later.
+    //
+    // c0 Buy market with stop 95 / TP 110 → long 10, bracket A.
+    // c1 Sell limit 105 (105 > close 100 → non-marketable) rests.
+    // c2 high 106 crosses 105 → the resting sell fills at 105, flattening
+    //    the long (realising +50); the SAME candle's Buy market opens a new
+    //    long 10 at close 102 with NO protective levels.
+    // c3 (Hold) dips to 94: with the stale bracket A still live it would
+    //    fire a phantom stop against the new long; cleared, nothing fires.
+    // c4 Close exits the surviving long at 96.
+    let r = run(
+        FillModel::Resting,
+        vec![
+            Decision::buy(1.0)
+                .with_stop(Price(95.0))
+                .with_take_profit(Price(110.0)),
+            sell_limit(105.0),
+            Decision::buy(1.0),
+            Decision::hold(),
+            Decision::close(),
+        ],
+        vec![
+            ohlc(0, 100.0, 101.0, 99.0, 100.0),
+            ohlc(1, 100.0, 101.0, 99.0, 100.0),
+            ohlc(2, 100.0, 106.0, 100.0, 102.0),
+            ohlc(3, 100.0, 101.0, 94.0, 96.0),
+            ohlc(4, 96.0, 97.0, 96.0, 96.0),
+        ],
+    )
+    .await;
+    assert_eq!(
+        r.trades.len(),
+        2,
+        "flatten-by-resting-fill, then a fresh close"
+    );
+    // Trade 1: long 100 → resting-sell flatten at 105 = +50.
+    assert!((r.trades[0].entry_price - 100.0).abs() < 1e-9);
+    assert!((r.trades[0].exit_price - 105.0).abs() < 1e-9);
+    // Trade 2: the NEW long (entry 102) must survive c3 and exit only on
+    // c4's Close at 96 — never a phantom stop at the dead bracket's 95.
+    assert!((r.trades[1].entry_price - 102.0).abs() < 1e-9);
+    assert!(
+        (r.trades[1].exit_price - 96.0).abs() < 1e-9,
+        "new long exits on the Close, not a stale-bracket phantom stop: {}",
+        r.trades[1].exit_price
+    );
+    assert_eq!(
+        r.trades[1].closed_at.timestamp_millis(),
+        4 * 60_000,
+        "the new long must live until c4's explicit Close"
+    );
+}
+
+#[tokio::test]
+async fn resting_scale_in_keeps_its_valid_bracket() {
+    // Counterpart to the stale-bracket fix: a resting fill that ADDS to a
+    // bracketed long in the SAME direction (a scale-in, position stays
+    // long) must NOT clear the still-valid bracket.
+    //
+    // c0 Buy market stop 90 / TP 110 → long 10, bracket A.
+    // c1 Buy limit 98 (< close 100 → non-marketable) rests.
+    // c2 dips to 98 → resting buy fills → long 20; bracket A still valid.
+    // c3 high 110 → bracket A's TP fills, closing the whole long 20.
+    let r = run(
+        FillModel::Resting,
+        vec![
+            Decision::buy(1.0)
+                .with_stop(Price(90.0))
+                .with_take_profit(Price(110.0)),
+            buy_limit(98.0),
+            Decision::hold(),
+            Decision::hold(),
+        ],
+        vec![
+            ohlc(0, 100.0, 101.0, 99.0, 100.0),
+            ohlc(1, 100.0, 101.0, 99.0, 100.0),
+            ohlc(2, 100.0, 101.0, 97.0, 100.0),
+            ohlc(3, 100.0, 111.0, 100.0, 108.0),
+        ],
+    )
+    .await;
+    // One realised close (the whole long 20 exits at the TP 110) — the
+    // bracket survived the scale-in.
+    assert_eq!(r.trades.len(), 1);
+    assert!(
+        (r.trades[0].exit_price - 110.0).abs() < 1e-9,
+        "the scale-in must not drop the live bracket: {}",
+        r.trades[0].exit_price
+    );
+    assert_eq!(r.trades[0].closed_at.timestamp_millis(), 3 * 60_000);
+}
+
+#[tokio::test]
+async fn reducing_resting_fill_drops_incoherent_stop() {
+    // Regression (LOW): a resting fill that REDUCES a long but leaves it
+    // long must reject a stop that sits on the wrong side (above the fill).
+    // Such a leg is meant for a different intended position; kept, it would
+    // fire almost immediately against the survivor.
+    //
+    // c0+c1 Buy market → long 20 at 100.
+    // c2 Sell limit 105 carrying stop 108 (above market — a short's stop)
+    //    rests (105 > close 100).
+    // c3 high 106 crosses 105 → the resting sell reduces long 20 → long 10
+    //    at 105; stop 108 is above 105 → incoherent for a long → dropped,
+    //    so no phantom stop-out on c3.
+    // c4 Close exits the surviving long 10 at 96.
+    let r = run(
+        FillModel::Resting,
+        vec![
+            Decision::buy(1.0),
+            Decision::buy(1.0),
+            sell_limit(105.0).with_stop(Price(108.0)),
+            Decision::hold(),
+            Decision::close(),
+        ],
+        vec![
+            ohlc(0, 100.0, 101.0, 99.0, 100.0),
+            ohlc(1, 100.0, 101.0, 99.0, 100.0),
+            ohlc(2, 100.0, 101.0, 99.0, 100.0),
+            ohlc(3, 100.0, 106.0, 100.0, 104.0),
+            ohlc(4, 96.0, 97.0, 96.0, 96.0),
+        ],
+    )
+    .await;
+    assert_eq!(r.trades.len(), 2, "partial reduce, then a fresh close");
+    // Trade 1: 10 of the long 20 exit at the reducing sell's 105 = +50.
+    assert!((r.trades[0].exit_price - 105.0).abs() < 1e-9);
+    // Trade 2: the surviving long 10 exits only on c4's Close at 96 — the
+    // incoherent above-market stop must never have fired.
+    assert!(
+        (r.trades[1].exit_price - 96.0).abs() < 1e-9,
+        "incoherent stop must be dropped, not fired: {}",
+        r.trades[1].exit_price
+    );
+    assert_eq!(r.trades[1].closed_at.timestamp_millis(), 4 * 60_000);
+}
+
+#[tokio::test]
+async fn marketable_buy_limit_capped_at_limit_under_slippage() {
+    // Regression (MEDIUM): a marketable buy limit fills as a taker at the
+    // close, but slippage may never push the fill THROUGH its own limit.
+    // Buy limit 103.2 on close 103.0 with FixedBps(50): raw slipped fill
+    // 103.0 × 1.005 = 103.515 (above the limit) → capped to 103.2.
+    let r = run_cfg(
+        cfg_slip(SlippageModel::FixedBps(50.0)),
+        vec![buy_limit(103.2), Decision::close()],
+        vec![
+            ohlc(0, 100.0, 106.0, 100.0, 103.0),
+            ohlc(1, 103.2, 103.2, 103.2, 103.2),
+        ],
+    )
+    .await;
+    assert_eq!(r.trades.len(), 1);
+    assert!(
+        (r.trades[0].entry_price - 103.2).abs() < 1e-9,
+        "buy fill capped at the limit, not slipped to 103.515: {}",
+        r.trades[0].entry_price
+    );
+}
+
+#[tokio::test]
+async fn marketable_sell_limit_capped_at_limit_under_slippage() {
+    // Sell mirror: a marketable sell limit's fill is floored at its limit.
+    // Sell limit 99.8 on close 100.0 with FixedBps(50): raw slipped fill
+    // 100.0 × 0.995 = 99.5 (below the limit) → floored to 99.8.
+    let r = run_cfg(
+        cfg_slip(SlippageModel::FixedBps(50.0)),
+        vec![sell_limit(99.8), Decision::close()],
+        vec![
+            ohlc(0, 100.0, 100.0, 94.0, 100.0),
+            ohlc(1, 100.0, 100.0, 100.0, 100.0),
+        ],
+    )
+    .await;
+    assert_eq!(r.trades.len(), 1);
+    assert!(
+        (r.trades[0].entry_price - 99.8).abs() < 1e-9,
+        "sell fill floored at the limit, not slipped to 99.5: {}",
+        r.trades[0].entry_price
+    );
+}
+
+#[tokio::test]
+async fn marketable_ioc_capped_at_limit_under_slippage() {
+    // A marketable IOC is a taker like a marketable limit — its limit caps
+    // the slipped fill too. IOC buy limit 103.2 on close 103.0, FixedBps(50)
+    // → capped to 103.2 (not 103.515).
+    let entry = Decision::buy(1.0)
+        .with_limit_price(Price(103.2))
+        .with_order_kind(OrderKind::Ioc);
+    let r = run_cfg(
+        cfg_slip(SlippageModel::FixedBps(50.0)),
+        vec![entry, Decision::close()],
+        vec![
+            ohlc(0, 100.0, 106.0, 100.0, 103.0),
+            ohlc(1, 103.2, 103.2, 103.2, 103.2),
+        ],
+    )
+    .await;
+    assert_eq!(r.trades.len(), 1);
+    assert!(
+        (r.trades[0].entry_price - 103.2).abs() < 1e-9,
+        "marketable IOC capped at the limit: {}",
+        r.trades[0].entry_price
+    );
+}
+
+#[tokio::test]
+async fn market_order_still_slips_uncapped() {
+    // Guard the cap's scope: a plain market order has no limit, so slippage
+    // still applies in full. Buy market on close 100 with FixedBps(50) →
+    // 100 × 1.005 = 100.5.
+    let r = run_cfg(
+        cfg_slip(SlippageModel::FixedBps(50.0)),
+        vec![Decision::buy(1.0), Decision::close()],
+        vec![
+            ohlc(0, 100.0, 101.0, 99.0, 100.0),
+            ohlc(1, 100.0, 101.0, 99.0, 100.0),
+        ],
+    )
+    .await;
+    assert_eq!(r.trades.len(), 1);
+    assert!(
+        (r.trades[0].entry_price - 100.5).abs() < 1e-9,
+        "market entry slips uncapped: {}",
+        r.trades[0].entry_price
+    );
+}
+
 // ── Legacy regression: the default is bit-identical ─────────────────────────
 
 /// A scenario touching every legacy code path the resting model changes:
