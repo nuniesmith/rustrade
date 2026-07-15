@@ -9,6 +9,8 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-14
+
 ### Added — perp funding model in the backtest engine
 
 - **`BacktestConfig::funding`** (builder: `.funding(FundingModel::…)`) —
@@ -77,8 +79,23 @@ workspace moves as one until any single crate needs to diverge.
 Like 0.4.0's additions, the new public struct fields
 (`BacktestConfig.{funding, fill_model}`, `BacktestResult.{funding_received,
 funding_paid, equity_times}`, `TradeOutcome.funding`) are breaking for
-struct-literal construction only; the builder APIs and serde round-trips
-stay backward-compatible.
+struct-literal construction only — hence the 0.4 → 0.5 bump (0.4.1 is
+published on crates.io, so shipping these under 0.4.x would break
+downstream struct-literal consumers inside a cargo-compatible range);
+the builder APIs and serde round-trips stay backward-compatible.
+
+### Changed — funding schedule re-validated at run time
+
+- **`Backtest::run` re-validates `BacktestConfig.funding`.**
+  `BacktestConfig`'s fields are public, so a `FundingModel::Series`
+  assigned *after* `build()` (or a config built via struct literal)
+  used to bypass the builder's validation and reach the engine
+  unsorted — `settlements_between`'s binary search then silently
+  dropped or double-booked settlements. `run()` now applies the same
+  normalisation the builder does: an unsorted series is sorted, and
+  NaN rates / duplicate settlement timestamps fail loud with
+  `Error::Config` instead of producing plausible-but-wrong funding
+  PnL. Configs from the builder are unaffected.
 
 ## [0.4.0] - 2026-06-14
 
@@ -706,7 +723,8 @@ Pre-release skeleton. See [`TODO.md`](./TODO.md) for the 0.1.0 ship criteria.
 - `rustrade-backtest` — directory reserved; not yet populated.
 - `rustrade` (facade) — directory reserved; not yet populated.
 
-[Unreleased]: https://github.com/nuniesmith/rustrade/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/nuniesmith/rustrade/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/nuniesmith/rustrade/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nuniesmith/rustrade/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/nuniesmith/rustrade/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/nuniesmith/rustrade/compare/v0.2.0...v0.2.1

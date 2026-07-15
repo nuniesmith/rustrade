@@ -91,8 +91,11 @@ impl FundingModel {
     /// is included.
     ///
     /// For [`Self::Series`] the series is assumed ascending by timestamp
-    /// (the config builder guarantees it); results on an unsorted series
-    /// are unspecified.
+    /// (the config builder sorts it, and
+    /// [`Backtest::run`](crate::Backtest::run) re-validates the schedule
+    /// so a series assigned directly to `BacktestConfig.funding` cannot
+    /// reach the engine unsorted); results on an unsorted series are
+    /// unspecified.
     pub fn settlements_between(&self, after: i64, until: i64) -> Vec<(i64, f64)> {
         if until <= after {
             return Vec::new();
@@ -116,6 +119,15 @@ impl FundingModel {
                 out
             }
             Self::Series(points) => {
+                // The binary search below is only correct on an ascending
+                // series. `Backtest::run` re-validates (and sorts) the
+                // schedule so this holds even for a series assigned
+                // directly to the pub `BacktestConfig.funding`; the
+                // debug-assert catches any future caller that bypasses it.
+                debug_assert!(
+                    points.windows(2).all(|w| w[0].0 <= w[1].0),
+                    "settlements_between requires an ascending series; call FundingModel::validated first"
+                );
                 let start = points.partition_point(|(t, _)| *t <= after);
                 let end = points.partition_point(|(t, _)| *t <= until);
                 points[start..end].to_vec()
