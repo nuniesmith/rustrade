@@ -12,9 +12,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rustrade_backtest::{
-    Backtest, BacktestConfig, BacktestResult, EIGHT_HOURS_MS, FeeModel, FundingModel, SlippageModel,
+    Backtest, BacktestConfig, BacktestResult, EIGHT_HOURS_MS, Error, FeeModel, FundingModel,
+    SlippageModel,
 };
-use rustrade_core::{Brain, Candle, Decision, MarketDataEvent, Position, Result as CoreResult};
+use rustrade_core::{
+    Brain, Candle, Decision, MarketDataEvent, Position, Result as CoreResult, SizeHint, Volume,
+};
 use rustrade_risk::SizingConfig;
 
 const HOUR_MS: i64 = 3_600_000;
@@ -46,6 +49,39 @@ impl Brain for OpenCloseBrain {
                 });
             }
         } else if Some(candle.time) == self.close_at {
+            return Ok(Decision::close());
+        }
+        Ok(Decision::hold())
+    }
+}
+
+/// Opens long at `open_at`, scales out `partial_qty` contracts at
+/// `partial_at`, and closes the rest at `close_at`. Drives the pro-rata
+/// funding-attribution branch that only partial closes exercise.
+struct ScaleOutBrain {
+    open_at: i64,
+    partial_at: i64,
+    partial_qty: f64,
+    close_at: i64,
+}
+#[async_trait]
+impl Brain for ScaleOutBrain {
+    fn name(&self) -> &str {
+        "scale-out"
+    }
+    async fn on_event(&self, event: &MarketDataEvent, position: &Position) -> CoreResult<Decision> {
+        let MarketDataEvent::Candle { candle, .. } = event else {
+            return Ok(Decision::hold());
+        };
+        if position.is_flat() {
+            if candle.time == self.open_at {
+                return Ok(Decision::buy(1.0));
+            }
+        } else if candle.time == self.partial_at {
+            return Ok(
+                Decision::sell(1.0).with_size_hint(SizeHint::Quantity(Volume(self.partial_qty)))
+            );
+        } else if candle.time == self.close_at {
             return Ok(Decision::close());
         }
         Ok(Decision::hold())
@@ -309,6 +345,136 @@ async fn accrual_attribution_stops_at_close() {
     // Everything funding-related is attributed — headline PnL equals the
     // single trade's net.
     assert_close(r.net_pnl, r.trades[0].net_pnl(), "net_pnl == trade net");
+}
+
+// ── Partial-close pro-rata funding attribution ──────────────────────────────
+
+#[tokio::test]
+async fn partial_close_splits_accrued_funding_pro_rata() {
+    // Long 10 at t=0. First settlement (8 h) charges the full book:
+    //   1 bp × 10 × 100 = 0.1 accrued.
+    // Scale out 4 at t=9 h: the close takes 4/10 of the accrual (0.04)
+    // and leaves 0.06 on the still-open 6.
+    // Second settlement (16 h) charges the 6 remaining:
+    //   1 bp × 6 × 100 = 0.06 → accrual is now 0.12.
+    // Close the last 6 at t=17 h: it takes the whole 0.12.
+    let r = Backtest::new(
+        config(FundingModel::Constant {
+            rate: ONE_BP,
+            interval_ms: EIGHT_HOURS_MS,
+        }),
+        Arc::new(ScaleOutBrain {
+            open_at: 0,
+            partial_at: 9 * HOUR_MS,
+            partial_qty: 4.0,
+            close_at: 17 * HOUR_MS,
+        }),
+    )
+    .with_candles(hourly_flat(18))
+    .run()
+    .await
+    .unwrap();
+
+    assert_eq!(r.trades.len(), 2, "one partial close + one final close");
+    // Partial close: 4 contracts, pro-rata 4/10 of the 0.1 accrued so far.
+    assert_close(r.trades[0].qty, 4.0, "partial qty");
+    assert_close(r.trades[0].funding, -0.04, "partial-close funding share");
+    // Final close: the remaining 6 contracts carry the leftover 0.06 from
+    // the first settlement plus the whole 0.06 from the second.
+    assert_close(r.trades[1].qty, 6.0, "final qty");
+    assert_close(r.trades[1].funding, -0.12, "final-close funding share");
+    // Every quote unit of funding is attributed exactly once: the two
+    // trades' shares sum to the total paid, no dust and no double-count.
+    assert_close(r.funding_paid, 0.16, "total funding_paid");
+    assert_close(
+        r.trades[0].funding + r.trades[1].funding,
+        -r.funding_paid,
+        "attributed funding == booked funding",
+    );
+    // Flat price + zero fees → headline PnL is pure funding.
+    assert_close(r.net_pnl, -0.16, "net_pnl");
+}
+
+// ── Mark sourcing: funding uses the last mark, not the entry price ──────────
+
+#[tokio::test]
+async fn funding_notional_uses_last_mark_not_entry_price() {
+    // 1-minute candles ramping 100, 101, 102, … so the mark diverges from
+    // the entry price. Settlement every 8 minutes; a single settlement at
+    // t=8 min books against the *previous* candle's close (t=7 min → 107),
+    // not the entry (100). Entry-price sourcing would yield 0.1; last-mark
+    // sourcing yields 0.107, and only the latter is correct.
+    let r = Backtest::new(
+        config(FundingModel::Constant {
+            rate: ONE_BP,
+            interval_ms: 8 * 60_000,
+        }),
+        Arc::new(OpenCloseBrain {
+            long: true,
+            open_at: 0,
+            close_at: None,
+        }),
+    )
+    .with_candles(ramp(10, 100.0, 1.0))
+    .run()
+    .await
+    .unwrap();
+
+    // 1 bp × 10 contracts × 107 (mark at the candle before settlement).
+    assert_close(r.funding_paid, 0.107, "funding_paid at last mark");
+    assert_close(r.funding_received, 0.0, "funding_received");
+}
+
+// ── Post-build struct-literal assignment can't smuggle an unsorted series ────
+
+#[tokio::test]
+async fn unsorted_series_assigned_after_build_is_sorted_at_run_time() {
+    // `BacktestConfig.funding` is a pub field, so a series can be assigned
+    // after the builder's validation. An unsorted series would make
+    // `settlements_between`'s binary search drop or double-book
+    // settlements; `run()` re-validates so the result matches the sorted
+    // equivalent (three 1 bp settlements = 0.3 paid).
+    let mut cfg = config(FundingModel::None);
+    cfg.funding = FundingModel::Series(vec![
+        (3 * EIGHT_HOURS_MS, ONE_BP),
+        (EIGHT_HOURS_MS, ONE_BP),
+        (2 * EIGHT_HOURS_MS, ONE_BP),
+    ]);
+    let r = Backtest::new(
+        cfg,
+        Arc::new(OpenCloseBrain {
+            long: true,
+            open_at: 0,
+            close_at: None,
+        }),
+    )
+    .with_candles(hourly_flat(25))
+    .run()
+    .await
+    .unwrap();
+    assert_close(r.funding_paid, 0.3, "unsorted series booked all three");
+}
+
+#[tokio::test]
+async fn duplicate_series_timestamps_assigned_after_build_fail_loud() {
+    // A post-build series with a duplicate settlement timestamp would
+    // double-book; `run()`'s re-validation rejects it as a config error
+    // rather than producing plausible-but-wrong funding PnL.
+    let mut cfg = config(FundingModel::None);
+    cfg.funding = FundingModel::Series(vec![(EIGHT_HOURS_MS, ONE_BP), (EIGHT_HOURS_MS, ONE_BP)]);
+    let err = Backtest::new(
+        cfg,
+        Arc::new(OpenCloseBrain {
+            long: true,
+            open_at: 0,
+            close_at: None,
+        }),
+    )
+    .with_candles(hourly_flat(25))
+    .run()
+    .await
+    .unwrap_err();
+    assert!(matches!(err, Error::Config(_)), "got {err:?}");
 }
 
 // ── Series vs constant fallback ─────────────────────────────────────────────

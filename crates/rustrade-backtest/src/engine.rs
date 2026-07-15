@@ -181,10 +181,25 @@ impl Backtest {
             }
         }
 
+        // Re-validate + normalise the funding schedule at run time.
+        // `BacktestConfig`'s fields are pub, so a schedule assigned after
+        // `build()` (or a config built via struct literal) would bypass
+        // the builder's validation — `settlements_between`'s binary
+        // search on an unsorted series silently drops or double-books
+        // settlements, corrupting funding PnL with no error. Sorting is
+        // the same normalisation `build()` applies; NaN rates and
+        // duplicate timestamps fail loud instead of poisoning results.
+        let funding = self
+            .config
+            .funding
+            .clone()
+            .validated()
+            .map_err(|why| Error::Config(format!("BacktestConfig.funding: {why}")))?;
+
         // Per-symbol previous candle timestamp — the funding settlement
         // window for a candle is `(prev_time, candle_time]`, matching the
         // live paper ledger's entry-exclusive / exit-inclusive accrual.
-        let funding_on = self.config.funding.is_enabled();
+        let funding_on = funding.is_enabled();
         let mut last_seen: BTreeMap<Symbol, i64> = BTreeMap::new();
 
         for (symbol, candle) in &merged {
@@ -207,7 +222,7 @@ impl Backtest {
             if funding_on {
                 let prev = last_seen.insert(symbol.clone(), candle.time);
                 if let Some(prev_t) = prev {
-                    for (_, rate) in self.config.funding.settlements_between(prev_t, candle.time) {
+                    for (_, rate) in funding.settlements_between(prev_t, candle.time) {
                         state.apply_funding(symbol, rate, self.config.contract_value);
                     }
                 }
