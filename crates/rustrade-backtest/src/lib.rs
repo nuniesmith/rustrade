@@ -29,6 +29,20 @@
 //! decisions are counted in [`BacktestResult::orders_blocked`]. Both
 //! gates default to off.
 //!
+//! # Fill models
+//!
+//! [`BacktestConfig::fill_model`] (builder: `.fill_model(FillModel::…)`)
+//! selects how orders become fills. The default,
+//! [`FillModel::TakerAtClose`], keeps the engine's historical
+//! single-candle semantics — existing backtests are bit-for-bit
+//! unchanged. [`FillModel::Resting`] opts in to honest resting-order
+//! semantics: non-marketable limits rest across candles and fill when a
+//! later candle crosses their level (at the limit price, or at the
+//! candle's open when it gaps through), stops trigger on a cross and
+//! fill at the level or worse, standalone (stop-only / TP-only)
+//! protective orders are honoured, and same-candle ambiguity resolves
+//! conservatively. See [`FillModel`] for the full convention list.
+//!
 //! # Perp funding
 //!
 //! [`BacktestConfig::funding`] (builder: `.funding(FundingModel::…)`)
@@ -57,7 +71,7 @@ pub mod metrics;
 pub mod result;
 pub mod slippage;
 
-pub use config::{BacktestConfig, BacktestConfigBuilder};
+pub use config::{BacktestConfig, BacktestConfigBuilder, FillModel};
 pub use engine::Backtest;
 pub use error::{Error, Result};
 pub use fees::FeeModel;

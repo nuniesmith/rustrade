@@ -2,11 +2,71 @@
 
 use rustrade_core::Symbol;
 use rustrade_risk::{CircuitBreakerConfig, SessionPnlConfig, SizingConfig};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::fees::FeeModel;
 use crate::funding::FundingModel;
 use crate::slippage::SlippageModel;
+
+/// How the replay engine turns orders into fills.
+///
+/// Selected via [`BacktestConfig::fill_model`] (builder:
+/// `.fill_model(FillModel::…)`). Defaults to [`FillModel::TakerAtClose`],
+/// the engine's historical behaviour — existing backtests are
+/// bit-identical with the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FillModel {
+    /// Legacy single-candle fills (the default).
+    ///
+    /// Market / IOC / FOK entries and closes fill as takers at the
+    /// decision candle's **close**. Limit / post-only entries fill only
+    /// if the *decision candle itself* crosses the level (marketability
+    /// judged against the candle **open**; a marketable limit fills at
+    /// the open as taker, a marketable post-only is rejected) and are
+    /// dropped otherwise — nothing rests across candles. Protective
+    /// brackets require **both** SL and TP legs and fill at their fixed
+    /// level even when a candle gaps through it.
+    #[default]
+    TakerAtClose,
+    /// Honest resting-order semantics.
+    ///
+    /// Orders reach the synthetic book at the decision candle's
+    /// **close** (the market price at decision time), so the decision
+    /// candle can never fill a resting order — its range printed before
+    /// the order existed (no lookahead).
+    ///
+    /// - **Market entries and closes** fill at the decision close as
+    ///   takers, same as legacy.
+    /// - **Limit / post-only entries** marketable at the close fill
+    ///   immediately at the close as takers (a marketable post-only is
+    ///   rejected). Non-marketable ones **rest** (GTC) and fill on the
+    ///   first later candle that crosses the level: at the **limit
+    ///   price** on a cross, or at that candle's **open** when the
+    ///   candle gaps through the level — never at a better price than
+    ///   the market offered. Resting fills are makers: maker fee rate,
+    ///   no slippage.
+    /// - **IOC / FOK entries** that are not marketable at the close are
+    ///   cancelled (the engine has no book depth, so both fill in full
+    ///   or not at all).
+    /// - **Protective stops** trigger on a cross and fill at the stop
+    ///   level *or worse* (gap through → that candle's open), as takers
+    ///   with slippage. **Take-profits** are resting limits: level on a
+    ///   cross, open on a gap (price improvement), maker fee, no
+    ///   slippage. Standalone (stop-only or TP-only) brackets are
+    ///   honoured — legacy mode requires both legs.
+    /// - **Same-candle ambiguity** (multiple levels inside one candle's
+    ///   range, OHLC path unknown) resolves to the *worse* outcome for
+    ///   the strategy: the stop leg fires before the take-profit leg;
+    ///   on the candle a resting entry fills, its attached stop may
+    ///   fire on that same candle, but its take-profit only becomes
+    ///   eligible from the next candle.
+    /// - At most **one resting entry per symbol**: any later non-`Hold`
+    ///   decision that passes the risk gates cancels it
+    ///   (cancel-and-replace, where the replacement may be nothing).
+    Resting,
+}
 
 /// Configuration for a [`crate::Backtest`].
 ///
@@ -44,6 +104,11 @@ pub struct BacktestConfig {
     pub slippage: SlippageModel,
     /// Fee schedule applied to every fill.
     pub fees: FeeModel,
+    /// How orders turn into fills — see [`FillModel`]. Defaults to
+    /// [`FillModel::TakerAtClose`] (the engine's historical behaviour);
+    /// opt in to honest resting limit/stop semantics with
+    /// [`FillModel::Resting`].
+    pub fill_model: FillModel,
     /// Perp funding-rate schedule applied to open positions at funding
     /// settlement timestamps (see [`FundingModel`] for the sign
     /// conventions and window semantics). Multi-symbol backtests share a
@@ -115,6 +180,7 @@ pub struct BacktestConfigBuilder {
     sizing: Option<SizingConfig>,
     slippage: Option<SlippageModel>,
     fees: Option<FeeModel>,
+    fill_model: Option<FillModel>,
     funding: Option<FundingModel>,
     contract_value: Option<f64>,
     risk_free_rate: Option<f64>,
@@ -160,6 +226,13 @@ impl BacktestConfigBuilder {
     /// Override the fee model (default `Flat(0.0005)`).
     pub fn fees(mut self, m: FeeModel) -> Self {
         self.fees = Some(m);
+        self
+    }
+    /// Override the fill model (default [`FillModel::TakerAtClose`] —
+    /// the engine's historical single-candle fills). Pass
+    /// [`FillModel::Resting`] for honest resting limit/stop semantics.
+    pub fn fill_model(mut self, m: FillModel) -> Self {
+        self.fill_model = Some(m);
         self
     }
     /// Enable perp funding cashflows (default [`FundingModel::None`] —
@@ -257,6 +330,7 @@ impl BacktestConfigBuilder {
             sizing: self.sizing.unwrap_or_default(),
             slippage: self.slippage.unwrap_or_default(),
             fees: self.fees.unwrap_or_default(),
+            fill_model: self.fill_model.unwrap_or_default(),
             funding,
             contract_value,
             risk_free_rate,
@@ -321,6 +395,7 @@ mod tests {
         assert_eq!(c.initial_cash, 10_000.0);
         assert_eq!(c.contract_value, 1.0);
         assert_eq!(c.slippage, SlippageModel::Zero);
+        assert_eq!(c.fill_model, FillModel::TakerAtClose);
         assert_eq!(c.funding, FundingModel::None);
         assert_eq!(c.risk_free_rate, 0.0);
         assert_eq!(c.periods_per_year, 252);

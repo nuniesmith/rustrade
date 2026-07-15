@@ -49,8 +49,51 @@ workspace moves as one until any single crate needs to diverge.
   older versions deserialize with an empty `equity_times` and an empty
   export.
 
+### Added — honest resting limit/stop fills in the backtest engine
+
+- **`BacktestConfig::fill_model`** (builder:
+  `.fill_model(FillModel::…)`) — selects the fill semantics. The default,
+  **`FillModel::TakerAtClose`**, keeps the historical behaviour and is
+  **bit-identical** to previous releases (regression-pinned). Opting in
+  to **`FillModel::Resting`** gives honest resting-order semantics:
+  - orders reach the synthetic book at the decision candle's **close**,
+    so the decision candle can never fill a resting order (no lookahead);
+  - a non-marketable limit / post-only **rests** (GTC, at most one per
+    symbol; cancel-and-replace on the next gate-passing non-`Hold`
+    decision) and fills when a later candle crosses its level — at the
+    limit price, or at that candle's **open** when it gaps through
+    (never better than the market offered); resting fills are makers
+    (maker fee rate, no slippage);
+  - a protective **stop** triggers on a cross and fills at the level
+    *or worse* (gap → open) as a taker with slippage; a **take-profit**
+    is a resting limit (level, or open on a gap — price improvement;
+    maker, no slippage);
+  - **standalone** stop-only / TP-only protections are honoured (legacy
+    requires both OCO legs);
+  - **same-candle ambiguity** resolves pessimistically: the stop leg
+    fires before the TP leg, and on the candle a resting entry fills its
+    attached stop may fire immediately but its TP only becomes eligible
+    from the next candle;
+  - non-marketable IOC / FOK entries are cancelled, not rested.
+
+  Hardening of the resting model (`FillModel::Resting` only; legacy stays
+  bit-identical):
+  - a resting fill that **flattens or flips** a bracketed position now
+    clears that position's protective bracket, so its legs can never fire
+    against an unrelated position opened later on the same or a later
+    candle;
+  - a **marketable** limit / IOC / FOK taker fill is now **capped at its
+    own limit** under slippage — a buy fills at `min(limit, slipped)`, a
+    sell at `max(limit, slipped)` — so a configured slippage can no longer
+    print a fill through the limit a real venue would honour;
+  - protective legs whose orientation is **incoherent** for the surviving
+    position (a long's stop above the fill, or a short's below) are
+    dropped instead of registered, preventing an immediate phantom
+    stop-out when a reducing entry carries levels meant for a different
+    intended position.
+
 Like 0.4.0's additions, the new public struct fields
-(`BacktestConfig.funding`, `BacktestResult.{funding_received,
+(`BacktestConfig.{funding, fill_model}`, `BacktestResult.{funding_received,
 funding_paid, equity_times}`, `TradeOutcome.funding`) are breaking for
 struct-literal construction only — hence the 0.4 → 0.5 bump (0.4.1 is
 published on crates.io, so shipping these under 0.4.x would break
