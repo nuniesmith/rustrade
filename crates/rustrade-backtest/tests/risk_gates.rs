@@ -199,16 +199,19 @@ async fn circuit_breaker_trips_then_resumes_after_cooldown() {
 }
 
 #[tokio::test]
-async fn gates_block_close_decisions_too_matching_live() {
-    // Live gates run before build_order, so a halted session blocks Close
-    // as well. Halt while still holding a position (via a partial close
-    // whose realised loss crosses the cap): the remaining position stays
-    // open and every later Close decision counts as blocked.
-    struct PartialThenClose;
+async fn gates_exempt_reduce_only_close_but_still_block_entries_matching_live() {
+    // Parity with the live `ExecutionService` (rustrade #59): a halted
+    // session EXEMPTS a reduce-only `Close` against a non-flat position —
+    // a de-risking exit reaches placement even under the halt — while
+    // still blocking entries (`Buy`/`Sell` opens). Halt while holding
+    // (a partial close whose realised loss crosses the cap) leaves a
+    // position open; the later `Close` on it must execute, and only the
+    // post-flat entry attempts count as blocked.
+    struct PartialCloseThenEntry;
     #[async_trait]
-    impl Brain for PartialThenClose {
+    impl Brain for PartialCloseThenEntry {
         fn name(&self) -> &str {
-            "partial-then-close"
+            "partial-close-then-entry"
         }
         async fn on_event(&self, e: &MarketDataEvent, p: &Position) -> CoreResult<Decision> {
             let MarketDataEvent::Candle { candle, .. } = e else {
@@ -218,15 +221,18 @@ async fn gates_block_close_decisions_too_matching_live() {
                 // Open 10 long at 100.
                 0 => Ok(Decision::buy(1.0)),
                 // Partially close 5 at 99 → realised -5 ≤ -5 halts, but
-                // 5 contracts are still open.
+                // 5 contracts are still open. (Not yet halted at decision
+                // time, so this fills regardless of the gate.)
                 1 => Ok(
                     Decision::sell(1.0).with_size_hint(rustrade_core::SizeHint::Quantity(
                         rustrade_core::Volume(5.0),
                     )),
                 ),
-                // From here every Close attempt must be blocked.
+                // Still holding under the halt: a reduce-only `Close` — the
+                // exempt de-risking exit — must reach placement and flatten.
                 _ if p.qty != 0.0 => Ok(Decision::close()),
-                _ => Ok(Decision::hold()),
+                // Now flat under the halt: every entry attempt is blocked.
+                _ => Ok(Decision::buy(1.0)),
             }
         }
         async fn health(&self) -> BrainHealth {
@@ -239,20 +245,28 @@ async fn gates_block_close_decisions_too_matching_live() {
             .session_pnl(SessionPnlConfig { loss_limit: -5.0 })
             .build()
             .unwrap(),
-        Arc::new(PartialThenClose),
+        Arc::new(PartialCloseThenEntry),
     )
     .with_candles(down_series(8, 100.0, 0, 60_000))
     .run()
     .await
     .unwrap();
 
-    // The partial close is the only realised trade; the halt then blocks
-    // every Close attempt on the still-open 5 contracts (candles 2..7).
-    assert_eq!(result.trades.len(), 1, "{:#?}", result.trades);
+    // Two realised trades: the partial close (5), then the exempt
+    // reduce-only close of the remaining 5 that executed *under the halt*.
+    // A blocked close would have left only the first trade.
+    assert_eq!(result.trades.len(), 2, "{:#?}", result.trades);
     assert_eq!(result.trades[0].qty, 5.0);
-    assert!(
-        result.orders_blocked >= 6,
-        "every post-halt Close must be blocked, got {}",
+    assert_eq!(
+        result.trades[1].qty, 5.0,
+        "the reduce-only Close must be exempt and flatten the position under the halt"
+    );
+
+    // Only the post-flat entry attempts (candles 3..7) are blocked; the
+    // exempt Close was not counted as blocked.
+    assert_eq!(
+        result.orders_blocked, 5,
+        "only entries under the halt are blocked, got {}",
         result.orders_blocked
     );
 }
