@@ -9,6 +9,32 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-16
+
+### Changed — backtest replay matches live exit-exemption for honest Gate-A numbers
+
+- **The backtest replay engine now exempts reduce-only exits from the
+  session-halt / circuit-breaker gates, matching live.** `0.5.1` gave the
+  live `ExecutionService` an exit-exemption (a `Close` against a non-flat
+  position bypasses Gate 1 / Gate 2 and reaches placement even under a
+  halt), but `rustrade-backtest`'s replay engine still blocked *every*
+  non-`Hold` decision — including such a `Close` — so live and backtest
+  diverged: replay under-counted de-risking exits and mis-stated behaviour
+  under a halt. The replay gate now applies the **same tight predicate** as
+  live — `SignalType::Close` *and* a non-flat position (`close_side().is_some()`)
+  → bypass the halt/breaker checks; every `Buy`/`Sell` entry, and a `Close`
+  with nothing to reduce, stays gated. Backtest and live now agree on exit
+  handling, so Gate-A backtests model live de-risking behaviour honestly.
+- **This changes backtest results.** A de-risking `Close` that lands while
+  a session is halted or the breaker is tripped now *executes* in replay
+  (flattening the position), where it was previously counted as blocked and
+  the position rode on. Runs that hit a halt while holding will show the
+  exit filled and one fewer blocked order; `orders_blocked` no longer counts
+  exempt exits. The halt/breaker accounting is unchanged — fills still feed
+  them exactly as before; only the exit *check* is bypassed.
+- API-compatible (behaviour-only): no public signatures changed;
+  `cargo-semver-checks` stays green. Patch bump.
+
 ## [0.5.1] - 2026-07-15
 
 ### Changed — de-risking exits bypass the session-halt / circuit-breaker checks

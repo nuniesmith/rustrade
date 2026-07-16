@@ -338,10 +338,25 @@ impl Backtest {
             signals_emitted += 1;
 
             // ── Risk gates (parity with the live ExecutionService) ────
-            // Gate 1: session-PnL halt; gate 2: circuit breaker. Like
-            // live, these block *every* non-Hold decision — including
-            // `Close` — after the signal is counted.
-            if let Some(r) = risk.get(symbol)
+            // Gate 1: session-PnL halt; gate 2: circuit breaker. Both
+            // block entries (`Buy`/`Sell`) after the signal is counted.
+            //
+            // Exit exemption (matches `ExecutionService`, rustrade #59): a
+            // genuine de-risking exit — a `Close` against a non-flat
+            // position — bypasses the halt/breaker checks. `resolve_order`
+            // turns exactly this case into a reduce-only fill sized to the
+            // current position, so it can only reduce or flatten, never
+            // open/increase/flip, and can never take on new risk under a
+            // halt. The predicate is intentionally tight: any `Buy`/`Sell`,
+            // and a `Close` with nothing to reduce (flat), stays gated. It
+            // reads the same `position` snapshot `resolve_order` sizes
+            // against, so the exemption decision and the order built can
+            // never diverge — the safe default is to gate unless the order
+            // is provably reducing.
+            let is_reduce_only_exit =
+                matches!(decision.signal, SignalType::Close) && position.close_side().is_some();
+            if !is_reduce_only_exit
+                && let Some(r) = risk.get(symbol)
                 && (r
                     .session
                     .as_ref()
@@ -358,12 +373,12 @@ impl Backtest {
                 continue;
             }
 
-            // Resting mode: any gate-passing non-`Hold` decision cancels
+            // Resting mode: any non-`Hold` decision that reaches here (a
+            // gate-passing entry, or an exempt reduce-only exit) cancels
             // the symbol's working entry order first (cancel-and-replace;
             // the replacement may be nothing — e.g. a `Close` on a flat
-            // position just pulls the resting order). Gated-off decisions
-            // above leave it resting, consistent with "the gates block
-            // every non-Hold decision".
+            // position just pulls the resting order). Gated-off entries
+            // above leave it resting.
             if resting_mode {
                 state.cancel_resting(symbol);
             }
