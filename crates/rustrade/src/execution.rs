@@ -29,7 +29,7 @@
 //! The exemption is deliberately **tight**: it fires only for
 //! [`SignalType::Close`] *and* only when the current position is not flat
 //! (`Position::close_side().is_some()`), which is the exact same notion
-//! [`build_order`](ExecutionService::build_order)'s `Close` arm uses to
+//! `build_order`'s `Close` arm uses to
 //! turn the decision into a reduce-only order sized to `position.qty`.
 //! A `Close` in that arm can only ever reduce or flatten — never open,
 //! increase, or flip — so an exempted signal can never take on new risk.
