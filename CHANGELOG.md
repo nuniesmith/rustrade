@@ -9,6 +9,34 @@ workspace moves as one until any single crate needs to diverge.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-15
+
+### Changed — de-risking exits bypass the session-halt / circuit-breaker checks
+
+- **Reduce-only exits now flow through under a halt or tripped breaker.**
+  Previously the two account-protection gates in `ExecutionService` —
+  `SessionPnl::is_session_halted` (Gate 1) and `CircuitBreaker::is_tripped`
+  (Gate 2) — ran for *every* non-`Hold` decision, including a
+  `Decision::Close`. A bot that hit its daily-loss halt or tripped its
+  breaker therefore **could not close a losing position** through the
+  normal signal path; the position rode on resting stops alone. This was a
+  de-risking gap. A genuine reduce-only exit — a `Close` against a
+  **non-flat** position — now skips the Gate 1 / Gate 2 *checks* and
+  reaches order placement, so an automated bot can always flatten. Entries
+  (`Buy`/`Sell`, i.e. opening or increasing exposure) remain fully gated by
+  Gates 1–3, and the halt/breaker are still recorded and tripped exactly as
+  before (fills feed them unchanged) — exits bypass only the *check*, not
+  the accounting.
+- The exemption is intentionally tight and cannot let an entry slip
+  through: it fires only for `SignalType::Close` **and** only when the
+  current position is not flat (`Position::close_side().is_some()`) — the
+  same notion `build_order`'s `Close` arm already uses to size a reduce-only
+  order to the open position, which can only reduce or flatten, never open,
+  increase, or flip. A `Close` with nothing to reduce is not exempt (safe
+  default: gate unless provably reducing). No public API changed
+  (semver-compatible patch), but this is a **behavior change** for halted /
+  breaker-tripped bots.
+
 ## [0.5.0] - 2026-07-14
 
 ### Added — perp funding model in the backtest engine
