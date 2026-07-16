@@ -21,7 +21,14 @@ jobs:
         with:
           key: fuzz
           workspaces: fuzz
-      - uses: taiki-e/install-action@cargo-fuzz
+      # cargo-fuzz isn't in install-action's curated tool list, so the old
+      # `@cargo-fuzz` short-tag never resolved to a ref (unlike @cargo-llvm-cov
+      # in ci.yml) and the step failed before anything installed. Pin the
+      # action to @v2 and name the tool explicitly; install-action fetches it
+      # via its cargo-binstall fallback.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Fuzz the CSV loader for 5 minutes
         run: cargo +nightly fuzz run load_csv -- -max_total_time=300
       - name: Upload crash artifacts
