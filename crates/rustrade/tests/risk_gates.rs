@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -51,6 +51,8 @@ struct CountingExchange {
     asset_class: Mutex<AssetClass>,
     /// Size (contracts) of the most recently placed order.
     last_size: AtomicU64,
+    /// `reduce_only` flag of the most recently placed order.
+    last_reduce_only: AtomicBool,
 }
 impl CountingExchange {
     fn new() -> (Arc<Self>, Arc<AtomicU64>, Arc<AtomicU64>) {
@@ -63,6 +65,7 @@ impl CountingExchange {
             min_notional: Mutex::new(0.0),
             asset_class: Mutex::new(AssetClass::CryptoSpot),
             last_size: AtomicU64::new(0),
+            last_reduce_only: AtomicBool::new(false),
         });
         (inst, placed, closed)
     }
@@ -82,6 +85,10 @@ impl CountingExchange {
     fn last_size(&self) -> u64 {
         self.last_size.load(Ordering::SeqCst)
     }
+
+    fn last_reduce_only(&self) -> bool {
+        self.last_reduce_only.load(Ordering::SeqCst)
+    }
 }
 #[async_trait]
 impl ExchangeClient for CountingExchange {
@@ -91,6 +98,7 @@ impl ExchangeClient for CountingExchange {
     async fn place_order(&self, o: &Order) -> Result<String> {
         self.last_size
             .store(o.size.value() as u64, Ordering::SeqCst);
+        self.last_reduce_only.store(o.reduce_only, Ordering::SeqCst);
         let n = self.placed.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(format!("ord-{n}"))
     }
@@ -670,6 +678,253 @@ async fn close_decision_on_flat_position_is_silent_noop() {
         placed.load(Ordering::SeqCst),
         0,
         "Close against a flat position must not place an order"
+    );
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+// ── De-risking exits bypass Gates 1 & 2 ──────────────────────────────────
+//
+// A session-halt or a tripped circuit breaker must NOT trap a losing
+// position: a genuine reduce-only Close has to reach `place_order` so the
+// bot can flatten. Entries stay fully blocked. Each test asserts the
+// observable — whether `place_order` was called — like the entry-blocking
+// tests above.
+
+#[tokio::test(start_paused = true)]
+async fn session_halt_allows_reduce_only_close() {
+    let brain = Arc::new(FixedSignalBrain {
+        signal: SignalType::Close,
+    });
+    let (exchange, placed, _closed) = CountingExchange::new();
+    // Non-flat position so the Close has something to reduce.
+    exchange.set_position(
+        Symbol::from("BTCUSDT"),
+        Position {
+            qty: 5.0,
+            entry_price: Some(100.0),
+            unrealised_pnl: 0.0,
+        },
+    );
+
+    let bot = Bot::new(
+        BotConfig::builder()
+            .name("halt-close")
+            .symbol("BTCUSDT")
+            .without_signal_handler()
+            .shutdown_timeout(Duration::from_secs(2))
+            .session_pnl_config(SessionPnlConfig { loss_limit: -1.0 })
+            .build()
+            .unwrap(),
+        exchange.clone(),
+        vec![brain],
+    )
+    .unwrap();
+
+    let handle = bot.handle();
+    // Trip the halt BEFORE any event flows: -10 net ≤ -1 limit.
+    handle
+        .record_trade_outcome(&Symbol::from("BTCUSDT"), -10.0, 0.0)
+        .await;
+
+    let bus = bot.market_data_bus().clone();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+    // Allow the startup prefetch to load the non-flat position.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    bus.publish(candle_event("BTCUSDT", 100.0));
+
+    wait_until(
+        || placed.load(Ordering::SeqCst) == 1,
+        Duration::from_secs(2),
+        "reduce-only close never reached the exchange under a session halt",
+    )
+    .await;
+
+    // It must have been a genuine reduce-only order sized to the position.
+    assert!(
+        exchange.last_reduce_only(),
+        "the exit that bypassed the halt must be a reduce-only order"
+    );
+    assert_eq!(
+        exchange.last_size(),
+        5,
+        "close should flatten all 5 contracts"
+    );
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn circuit_breaker_allows_reduce_only_close() {
+    let brain = Arc::new(FixedSignalBrain {
+        signal: SignalType::Close,
+    });
+    let (exchange, placed, _closed) = CountingExchange::new();
+    exchange.set_position(
+        Symbol::from("BTCUSDT"),
+        Position {
+            qty: -3.0,
+            entry_price: Some(100.0),
+            unrealised_pnl: 0.0,
+        },
+    );
+
+    let bot = Bot::new(
+        BotConfig::builder()
+            .name("breaker-close")
+            .symbol("BTCUSDT")
+            .without_signal_handler()
+            .shutdown_timeout(Duration::from_secs(2))
+            .circuit_breaker_config(CircuitBreakerConfig {
+                loss_limit: 1,
+                window_secs: 3600,
+                cooldown_secs: 3600,
+            })
+            .build()
+            .unwrap(),
+        exchange.clone(),
+        vec![brain],
+    )
+    .unwrap();
+
+    let handle = bot.handle();
+    // Trip the breaker: 1 loss is enough.
+    handle
+        .record_trade_outcome(&Symbol::from("BTCUSDT"), -5.0, 0.0)
+        .await;
+
+    let bus = bot.market_data_bus().clone();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    bus.publish(candle_event("BTCUSDT", 100.0));
+
+    wait_until(
+        || placed.load(Ordering::SeqCst) == 1,
+        Duration::from_secs(2),
+        "reduce-only close never reached the exchange under a tripped breaker",
+    )
+    .await;
+
+    assert!(
+        exchange.last_reduce_only(),
+        "the exit that bypassed the breaker must be a reduce-only order"
+    );
+    assert_eq!(
+        exchange.last_size(),
+        3,
+        "close should flatten all 3 contracts"
+    );
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+/// Tight-exemption safety: under a session halt, an entry `Buy` is blocked
+/// even though a reduce-only `Close` would be allowed. The exemption keys on
+/// the signal being `Close` against a non-flat position — a `Buy` can never
+/// masquerade as an exit. (Complements `session_halt_blocks_buy_order`,
+/// asserting the entry-vs-exit split under the *same* halt condition.)
+#[tokio::test(start_paused = true)]
+async fn session_halt_still_blocks_entry_buy_while_close_would_pass() {
+    let brain = Arc::new(FixedSignalBrain {
+        signal: SignalType::Buy,
+    });
+    let (exchange, placed, _closed) = CountingExchange::new();
+    // A non-flat position exists — so the *only* thing keeping this Buy out
+    // is that it is an entry, not that there's nothing to close.
+    exchange.set_position(
+        Symbol::from("BTCUSDT"),
+        Position {
+            qty: 5.0,
+            entry_price: Some(100.0),
+            unrealised_pnl: 0.0,
+        },
+    );
+
+    let bot = Bot::new(
+        BotConfig::builder()
+            .name("halt-entry")
+            .symbol("BTCUSDT")
+            .without_signal_handler()
+            .shutdown_timeout(Duration::from_secs(2))
+            .session_pnl_config(SessionPnlConfig { loss_limit: -1.0 })
+            .sizing_config(SizingConfig {
+                margin_per_trade: 100.0,
+                leverage: 1,
+                max_contracts: 10,
+            })
+            .build()
+            .unwrap(),
+        exchange,
+        vec![brain],
+    )
+    .unwrap();
+
+    let handle = bot.handle();
+    handle
+        .record_trade_outcome(&Symbol::from("BTCUSDT"), -10.0, 0.0)
+        .await;
+
+    let bus = bot.market_data_bus().clone();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    bus.publish(candle_event("BTCUSDT", 100.0));
+    bus.publish(candle_event("BTCUSDT", 100.0));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        placed.load(Ordering::SeqCst),
+        0,
+        "an entry Buy must stay blocked under a session halt even when a position is open"
+    );
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+}
+
+/// Tight-exemption safety, flat case: a `Close` with nothing to reduce is
+/// NOT exempt (safe default = gate), and produces no order regardless. Under
+/// a halt it must place nothing — an exempt-looking signal can't turn into a
+/// placement when there is no position to reduce.
+#[tokio::test(start_paused = true)]
+async fn session_halt_close_on_flat_places_nothing() {
+    let brain = Arc::new(FixedSignalBrain {
+        signal: SignalType::Close,
+    });
+    let (exchange, placed, _closed) = CountingExchange::new();
+    // No position set → flat.
+
+    let bot = Bot::new(
+        BotConfig::builder()
+            .name("halt-close-flat")
+            .symbol("BTCUSDT")
+            .without_signal_handler()
+            .shutdown_timeout(Duration::from_secs(2))
+            .session_pnl_config(SessionPnlConfig { loss_limit: -1.0 })
+            .build()
+            .unwrap(),
+        exchange,
+        vec![brain],
+    )
+    .unwrap();
+
+    let handle = bot.handle();
+    handle
+        .record_trade_outcome(&Symbol::from("BTCUSDT"), -10.0, 0.0)
+        .await;
+
+    let bus = bot.market_data_bus().clone();
+    let task = tokio::spawn(async move { bot.run_until_shutdown().await });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    bus.publish(candle_event("BTCUSDT", 100.0));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert_eq!(
+        placed.load(Ordering::SeqCst),
+        0,
+        "a Close against a flat position must place nothing, halt or not"
     );
 
     handle.shutdown();

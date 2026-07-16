@@ -15,6 +15,27 @@
 //! The first three are *risk-layer* concerns and never raise an error
 //! that aborts the service. A `Decision::Close` for a flat position is
 //! also a silent skip (logged at debug level).
+//!
+//! ## De-risking exits bypass Gates 1 & 2
+//!
+//! Gates 1 and 2 protect against *taking on new risk*. A genuine
+//! de-risking exit — a `Decision::Close` against a **non-flat** position —
+//! must always be allowed through so an automated bot that has halted (or
+//! tripped its breaker) can still flatten a losing position instead of
+//! leaving it to ride on resting stops alone. Such exits therefore skip
+//! the Gate 1 / Gate 2 *checks* (they do not skip Gate 3, which already
+//! exempts exits by construction).
+//!
+//! The exemption is deliberately **tight**: it fires only for
+//! [`SignalType::Close`] *and* only when the current position is not flat
+//! (`Position::close_side().is_some()`), which is the exact same notion
+//! [`build_order`](ExecutionService::build_order)'s `Close` arm uses to
+//! turn the decision into a reduce-only order sized to `position.qty`.
+//! A `Close` in that arm can only ever reduce or flatten — never open,
+//! increase, or flip — so an exempted signal can never take on new risk.
+//! Every `Buy`/`Sell` (open or increase) stays fully gated, and a `Close`
+//! with nothing to reduce (flat) is *not* exempted: the safe default is to
+//! gate unless the order is provably reducing.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -187,33 +208,55 @@ impl ExecutionService {
         });
         let _ = published;
 
-        // ── Gate 1: session PnL halt ──────────────────────────────────
-        if let Some(risk) = self.ctx.risk.read().await.get(&symbol)
-            && risk.session_pnl.is_session_halted()
-        {
-            self.orders_blocked.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                service = %self.name,
-                symbol = %symbol,
-                signal = %signal,
-                "decision blocked: session PnL halted"
-            );
-            return Ok(());
-        }
+        // A genuine de-risking exit: a `Close` against a non-flat position.
+        // `build_order`'s `Close` arm turns exactly this case into a
+        // reduce-only order sized to `position.qty` — it can only reduce or
+        // flatten, never open/increase/flip — so it can never take on new
+        // risk and is allowed to bypass the Gate 1 / Gate 2 *checks* below.
+        // The predicate is intentionally tight: any `Buy`/`Sell`, and a
+        // `Close` with nothing to reduce (flat), is NOT exempt. Uses the
+        // same `position` snapshot `build_order` will size against, so the
+        // exemption decision and the order built can never diverge. Safe
+        // default: gate unless the order is provably reducing.
+        let is_reduce_only_exit =
+            matches!(signal, SignalType::Close) && position.close_side().is_some();
 
-        // ── Gate 2: circuit breaker ───────────────────────────────────
-        if let Some(risk) = self.ctx.risk.read().await.get(&symbol)
-            && risk.circuit_breaker.is_tripped()
-        {
-            self.orders_blocked.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
+        if !is_reduce_only_exit {
+            // ── Gate 1: session PnL halt ──────────────────────────────
+            if let Some(risk) = self.ctx.risk.read().await.get(&symbol)
+                && risk.session_pnl.is_session_halted()
+            {
+                self.orders_blocked.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    service = %self.name,
+                    symbol = %symbol,
+                    signal = %signal,
+                    "decision blocked: session PnL halted"
+                );
+                return Ok(());
+            }
+
+            // ── Gate 2: circuit breaker ───────────────────────────────
+            if let Some(risk) = self.ctx.risk.read().await.get(&symbol)
+                && risk.circuit_breaker.is_tripped()
+            {
+                self.orders_blocked.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    service = %self.name,
+                    symbol = %symbol,
+                    signal = %signal,
+                    cooldown_secs = ?risk.circuit_breaker.cooldown_remaining(),
+                    "decision blocked: circuit breaker tripped"
+                );
+                return Ok(());
+            }
+        } else {
+            tracing::debug!(
                 service = %self.name,
                 symbol = %symbol,
                 signal = %signal,
-                cooldown_secs = ?risk.circuit_breaker.cooldown_remaining(),
-                "decision blocked: circuit breaker tripped"
+                "reduce-only exit — bypassing session-halt / circuit-breaker checks"
             );
-            return Ok(());
         }
 
         // ── Build the order ───────────────────────────────────────────
