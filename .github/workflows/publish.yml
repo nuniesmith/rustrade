@@ -1,0 +1,59 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags: ["rustrade-v[0-9]+.[0-9]+.[0-9]+"]
+
+jobs:
+  gate:
+    name: workspace gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  publish-core:
+    needs: [gate]
+    uses: nuniesmith/actions/.github/workflows/rust-crate-publish.yml@v1
+    with:
+      crate-path: crates/rustrade-core
+      tag-prefix: "rustrade-v"
+    secrets: inherit
+
+  publish-supervisor:
+    needs: [gate]
+    uses: nuniesmith/actions/.github/workflows/rust-crate-publish.yml@v1
+    with:
+      crate-path: crates/rustrade-supervisor
+      tag-prefix: "rustrade-v"
+    secrets: inherit
+
+  publish-risk:
+    needs: [publish-core]
+    uses: nuniesmith/actions/.github/workflows/rust-crate-publish.yml@v1
+    with:
+      crate-path: crates/rustrade-risk
+      tag-prefix: "rustrade-v"
+    secrets: inherit
+
+  publish-backtest:
+    needs: [publish-risk]
+    uses: nuniesmith/actions/.github/workflows/rust-crate-publish.yml@v1
+    with:
+      crate-path: crates/rustrade-backtest
+      tag-prefix: "rustrade-v"
+    secrets: inherit
+
+  publish-framework:
+    needs: [publish-risk, publish-supervisor]
+    uses: nuniesmith/actions/.github/workflows/rust-crate-publish.yml@v1
+    with:
+      crate-path: crates/rustrade
+      tag-prefix: "rustrade-v"
+    secrets: inherit
